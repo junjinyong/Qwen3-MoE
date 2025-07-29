@@ -31,6 +31,5 @@ class Qwen3MoeConfig:
     mlp_only_layers: List = None
     head_dim: int = 128
     pad_token_id: int = 151643
-    rope_type: str = "silu"
 
 __all__ = ["Qwen3MoeConfig"]
