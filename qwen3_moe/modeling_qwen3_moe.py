@@ -39,13 +39,13 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.modeling_utils import PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
 
 from configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.modeling_rope_utils import _compute_default_rope_parameters, dynamic_rope_update
-
+from transformers.sdpa_attention import sdpa_attention_forward
 
 def rotate_half(x):
     x1 = x[..., : x.shape[-1] // 2]
@@ -147,10 +147,7 @@ class Qwen3MoeAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
+        attention_interface: Callable = sdpa_attention_forward
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
