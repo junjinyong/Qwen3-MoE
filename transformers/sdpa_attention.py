@@ -21,7 +21,7 @@ def sdpa_attention_forward(
     dropout: float = 0.0,
     scaling: Optional[float] = None,
     is_causal: Optional[bool] = None,
-) -> tuple[torch.Tensor, None]:
+) -> torch.Tensor:
     sdpa_kwargs = {}
     key = repeat_kv(key, module.num_key_value_groups)
     value = repeat_kv(value, module.num_key_value_groups)
@@ -60,4 +60,4 @@ def sdpa_attention_forward(
     )
     attn_output = attn_output.transpose(1, 2).contiguous()
 
-    return attn_output, None
+    return attn_output

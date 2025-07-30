@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import List, Dict
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Optional
 
 @dataclass(frozen=True)
 class Qwen3MoeConfig:
@@ -32,5 +32,17 @@ class Qwen3MoeConfig:
     head_dim: int = 128
     pad_token_id: int = 151643
     _attn_implementation: str = "sdpa"
+    max_seq_len: str = 32768
+
+    @classmethod
+    def get_config(cls, name: str):
+        return getattr(cls, name)()
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict] = None):
+        return cls(**(data or {}))
+
+    def dict(self):
+        return asdict(self)
 
 __all__ = ["Qwen3MoeConfig"]
