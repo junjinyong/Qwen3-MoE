@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -15,7 +15,7 @@ class Qwen3MoeAttention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.head_dim = config.head_dim
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = pow(self.head_dim, -0.5)
         self.attention_dropout = config.attention_dropout
@@ -39,14 +39,21 @@ class Qwen3MoeAttention(nn.Module):
         position_embeddings: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
+        print("(Attention) hidden_states:", hidden_states.shape)  # [batch_size, seq_len, n_heads * head_dim]
+        print("(Attention) position_embeddings:", position_embeddings.shape) # [batch_size, head_dim // 2], complex64
+        print("(Attention) attention_mask:", attention_mask.shape) # [1, 1, seq_len, seq_len]
         input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
+        hidden_shape = (*input_shape, -1, self.head_dim) # [batch_size, seq_len, n_heads, head_dim]
 
-        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
+        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
+        value_states = self.v_proj(hidden_states).view(hidden_shape)
 
         query_states, key_states = apply_rotary_emb(query_states, key_states, position_embeddings)
+
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
 
         attn_output = sdpa_attention_forward(
             self,
@@ -131,7 +138,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             # the `top_x` tensor here.
             final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-        return final_hidden_states, router_logits
+        return final_hidden_states
 
 
 class Qwen3MoeRMSNorm(nn.Module):
@@ -167,13 +174,10 @@ class Qwen3MoeDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[tuple[torch.Tensor]] = None,
-        use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-    ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        start_pos: int,
+        position_embeddings: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.FloatTensor:
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -181,12 +185,9 @@ class Qwen3MoeDecoderLayer(nn.Module):
         # Self Attention
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            use_cache=use_cache,
-            cache_position=cache_position,
+            start_pos=start_pos,
             position_embeddings=position_embeddings,
+            attention_mask=attention_mask
         )
         hidden_states = residual + hidden_states
 
@@ -197,32 +198,6 @@ class Qwen3MoeDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         return hidden_states
-
-
-class Qwen3MoeRotaryEmbedding(nn.Module):
-    def __init__(self, config: Qwen3MoeConfig, device=None):
-        super().__init__()
-        self.config = config
-
-        inv_freq, self.attention_scaling = _compute_default_rope_parameters(self.config, device)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
-
-        assert not config.rope_scaling
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
-        position_ids_expanded = position_ids[:, None, :].float()
-
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):  # Force float32
-            freqs = torch.matmul(inv_freq_expanded.float(), position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 class Qwen3MoeModel(nn.Module):
@@ -246,7 +221,8 @@ class Qwen3MoeModel(nn.Module):
         # Initialize weights and apply final processing
         # self.post_init()
 
-    def forward(self, input_ids: Optional[torch.LongTensor], start_pos = 0) -> torch.Tensor:
+    def forward(self, input_ids: torch.LongTensor, start_pos = 0) -> torch.Tensor:
+        print("input_ids:", input_ids.shape)
         batch_size, seq_len = input_ids.shape
 
         causal_mask = torch.full(
@@ -257,8 +233,10 @@ class Qwen3MoeModel(nn.Module):
             requires_grad=False
         )
         causal_mask = torch.triu(input=causal_mask, diagonal=start_pos + 1).to(dtype=torch.float16)
+        print("causal_mask:", causal_mask.shape)
 
         hidden_states = self.embed_tokens(input_ids)
+        print("hidden_states:", hidden_states.shape)
 
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(
@@ -267,9 +245,12 @@ class Qwen3MoeModel(nn.Module):
                 position_embeddings=self.position_embeddings[start_pos : start_pos + seq_len],
                 attention_mask=causal_mask
             )
+            print("hidden_states:", hidden_states.shape)
 
         hidden_states = self.norm(hidden_states)
+        print("hidden_states:", hidden_states.shape)
         logits = self.lm_head(hidden_states)
+        print("logits:", logits.shape)
         return logits
 
 __all__ = ["Qwen3MoeModel"]
