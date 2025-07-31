@@ -37,7 +37,7 @@ def main(
     prompts = ["Four score and seven years ago our fathers brought forth on this continent, a new nation, conceived in Liberty, and dedicated to the proposition that all men are created equal."]
     tokens = torch.tensor([tokenizer.encode(prompt).ids for prompt in prompts], dtype=torch.int64, device=torch.device("cpu"))
     result = model(tokens)
-    save_file(result, "result.safetensors")
+    save_file({"logits": result}, "result.safetensors")
 
 
 if __name__ == "__main__":
