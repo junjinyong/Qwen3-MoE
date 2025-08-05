@@ -39,9 +39,6 @@ class Qwen3MoeAttention(nn.Module):
         position_embeddings: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
-        print("(Attention) hidden_states:", hidden_states.shape)  # [batch_size, seq_len, n_heads * head_dim]
-        print("(Attention) position_embeddings:", position_embeddings.shape) # [batch_size, head_dim // 2], complex64
-        print("(Attention) attention_mask:", attention_mask.shape) # [1, 1, seq_len, seq_len]
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim) # [batch_size, seq_len, n_heads, head_dim]
 
@@ -161,6 +158,7 @@ class Qwen3MoeRMSNorm(nn.Module):
 class Qwen3MoeDecoderLayer(nn.Module):
     def __init__(self, config: Qwen3MoeConfig, layer_idx: int):
         super().__init__()
+        self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
 
         self.self_attn = Qwen3MoeAttention(config, layer_idx)
@@ -179,8 +177,12 @@ class Qwen3MoeDecoderLayer(nn.Module):
         attention_mask: torch.Tensor,
     ) -> torch.FloatTensor:
         residual = hidden_states
+        if self.layer_idx == 0:
+            print("(A)", hidden_states[:, :, :5])
 
         hidden_states = self.input_layernorm(hidden_states)
+        if self.layer_idx == 0:
+            print("(B)", hidden_states[:, :, :5])
 
         # Self Attention
         hidden_states = self.self_attn(
@@ -189,16 +191,21 @@ class Qwen3MoeDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             attention_mask=attention_mask
         )
+        if self.layer_idx == 0:
+            print("(C)", hidden_states[:, :, :5])
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        if self.layer_idx == 0:
+            print("(D)", hidden_states[:, :, :5])
         hidden_states = self.mlp(hidden_states)
+        if self.layer_idx == 0:
+            print("(E)", hidden_states[:, :, :5])
         hidden_states = residual + hidden_states
 
         return hidden_states
-
 
 class Qwen3MoeModel(nn.Module):
     def __init__(self, config: Qwen3MoeConfig):
@@ -222,21 +229,11 @@ class Qwen3MoeModel(nn.Module):
         # self.post_init()
 
     def forward(self, input_ids: torch.LongTensor, start_pos = 0) -> torch.Tensor:
-        print("input_ids:", input_ids.shape)
         batch_size, seq_len = input_ids.shape
 
-        causal_mask = torch.full(
-            size=(1, 1, seq_len, seq_len),
-            fill_value=float("-inf"),
-            dtype=torch.float32,
-            device=torch.device("cpu"),
-            requires_grad=False
-        )
-        causal_mask = torch.triu(input=causal_mask, diagonal=start_pos + 1).to(dtype=torch.float16)
-        print("causal_mask:", causal_mask.shape)
+        causal_mask = None
 
         hidden_states = self.embed_tokens(input_ids)
-        print("hidden_states:", hidden_states.shape)
 
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(
@@ -245,12 +242,11 @@ class Qwen3MoeModel(nn.Module):
                 position_embeddings=self.position_embeddings[start_pos : start_pos + seq_len],
                 attention_mask=causal_mask
             )
-            print("hidden_states:", hidden_states.shape)
+            # print(hidden_states.shape)
+            # print(hidden_states[:, :, :5])
 
         hidden_states = self.norm(hidden_states)
-        print("hidden_states:", hidden_states.shape)
         logits = self.lm_head(hidden_states)
-        print("logits:", logits.shape)
         return logits
 
 __all__ = ["Qwen3MoeModel"]

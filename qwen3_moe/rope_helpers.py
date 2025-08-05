@@ -14,15 +14,12 @@ def precompute_freqs_cis(config: Any):
     freqs = torch.reciprocal(torch.pow(theta, indices)).to(dtype=torch.float32)
     t = torch.arange(start=0, end=config.max_seq_len, step=1, dtype=torch.float32, requires_grad=False)  # type: ignore
     freqs = torch.outer(t, freqs).to(dtype=torch.float32)  # type: ignore
-    freqs_cis = torch.polar(abs=torch.ones_like(input=freqs, dtype=torch.float32), angle=freqs)  # complex64
+    freqs_cis = torch.polar(abs=torch.ones_like(input=freqs, dtype=torch.float32), angle=torch.neg(freqs))  # complex64
     return freqs_cis
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
-    #assert freqs_cis.dim == 2 and x.dim == 4
-    print("freqs_cis:", freqs_cis.shape)
-    print("x:", x.shape)
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)

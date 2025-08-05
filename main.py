@@ -34,10 +34,22 @@ def main(
     model.eval()
     tokenizer = Tokenizer.from_file(tokenizer_path)
 
-    prompts = ["Four score and seven years ago our fathers brought forth on this continent, a new nation, conceived in Liberty, and dedicated to the proposition that all men are created equal."]
+    prompt = "Four score and seven years ago our fathers brought forth on this continent, a new nation, conceived in Liberty, and dedicated to the proposition that all men are created equal."
+    prompt = "Four score and seven"
+
+    prompts = [prompt]
     tokens = torch.tensor([tokenizer.encode(prompt).ids for prompt in prompts], dtype=torch.int64, device=torch.device("cpu"))
-    result = model(tokens)
-    save_file({"logits": result}, "result.safetensors")
+    print("tokens:", tokens)
+    logits = model(tokens)
+    save_file({"logits": logits}, "result.safetensors")
+
+    next_token_logits = logits[0, -1]
+    probs = torch.softmax(next_token_logits, dim=-1)
+    topk = torch.topk(probs, k=5)
+    top_tokens = list(map(tokenizer.id_to_token, topk.indices.tolist()))
+    top_probs = topk.values.tolist()
+    for token, prob in zip(top_tokens, top_probs):
+        print(f"{token!r}: {prob:.4f}")
 
 
 if __name__ == "__main__":
