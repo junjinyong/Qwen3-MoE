@@ -35,11 +35,11 @@ def main(
     tokenizer = Tokenizer.from_file(tokenizer_path)
 
     prompt = "Four score and seven years ago our fathers brought forth on this continent, a new nation, conceived in Liberty, and dedicated to the proposition that all men are created equal."
-    prompt = "Four score and seven"
+    prompt = "Four score and seven years ago our fathers brought"
+    print("prompt:", prompt)
 
     prompts = [prompt]
     tokens = torch.tensor([tokenizer.encode(prompt).ids for prompt in prompts], dtype=torch.int64, device=torch.device("cpu"))
-    print("tokens:", tokens)
     logits = model(tokens)
     save_file({"logits": logits}, "result.safetensors")
 
