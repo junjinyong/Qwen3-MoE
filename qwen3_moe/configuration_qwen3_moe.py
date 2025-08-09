@@ -31,8 +31,8 @@ class Qwen3MoeConfig:
     mlp_only_layers: List = None
     head_dim: int = 128
     _attn_implementation: str = "sdpa"
-    max_seq_len: str = 32768
-    max_batch_size: str = 4
+    max_seq_len: int = 32768
+    max_batch_size: int = 4
     bos_token_id: int = 151643
     pad_token_id: int = 151643
     eos_token_id: int = 151645
