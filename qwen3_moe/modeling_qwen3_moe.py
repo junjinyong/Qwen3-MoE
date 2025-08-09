@@ -85,7 +85,7 @@ class Qwen3MoeMLP(nn.Module):
         assert config.hidden_act == "silu"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(torch.mul(self.act_fn(self.gate_proj(x)), self.up_proj(x)))
 
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
@@ -121,7 +121,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
 
             current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
-            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+            current_hidden_states = torch.mul(expert_layer(current_state), routing_weights[top_x, idx, None])
 
             final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
@@ -138,8 +138,8 @@ class Qwen3MoeRMSNorm(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        hidden_states = torch.mul(hidden_states, torch.rsqrt(variance + self.variance_epsilon))
+        return torch.mul(self.weight, hidden_states.to(input_dtype))
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
