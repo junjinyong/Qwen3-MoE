@@ -30,9 +30,12 @@ class Qwen3MoeConfig:
     router_aux_loss_coef: float = 0.001
     mlp_only_layers: List = None
     head_dim: int = 128
-    pad_token_id: int = 151643
     _attn_implementation: str = "sdpa"
     max_seq_len: str = 32768
+    max_batch_size: str = 4
+    bos_token_id: int = 151643
+    pad_token_id: int = 151643
+    eos_token_id: int = 151645
 
     @classmethod
     def get_config(cls, name: str):

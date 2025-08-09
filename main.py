@@ -1,6 +1,6 @@
 import fire
 import json
-from typing import Optional
+from typing import Optional, List
 import torch
 from pathlib import Path
 from safetensors.torch import load_file, save_file
@@ -10,46 +10,100 @@ from tokenizers import Tokenizer
 from qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel
 
+
+def sample_top_p(probs, p):
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    probs_sum = torch.cumsum(probs_sort, dim=-1)
+    mask = torch.gt(torch.sub(probs_sum, probs_sort), p)
+    probs_sort.masked_fill_(mask, 0.0)
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    next_token = torch.multinomial(probs_sort, num_samples=1)
+    next_token = torch.gather(probs_idx, -1, next_token)
+    return next_token
+
+
+class Qwen3MoE:
+    def __init__(self, ckpt_dir: str, tokenizer_path: str, config_path: Optional[str] = None) -> None:
+        torch.manual_seed(42)
+        torch.set_default_device(torch.device("cpu"))
+        torch.set_default_dtype(torch.float16)
+
+        data = None
+        if config_path is not None:
+            with open(config_path, "r") as f:
+                data = json.load(f)
+
+        self.config = Qwen3MoeConfig.from_dict(data)
+        self.model = Qwen3MoeModel(self.config)
+        self.tokenizer = Tokenizer.from_file(tokenizer_path)
+
+        ckpt_paths = sorted(Path(ckpt_dir).glob("*.safetensors"))
+        state_dict = {
+            (key[len("model."):] if key.startswith("model.") else key): value
+            for ckpt_path in ckpt_paths
+            for key, value in load_file(ckpt_path, device="cpu").items()
+        }
+        self.model.load_state_dict(state_dict, strict=True)
+        self.model.eval()
+
+    def generate(self, prompts: List[str], max_gen_len: int, temperature: float = 0.6, top_p: float = 0.9) -> List[List[str]]:
+        prompt_tokens = [self.tokenizer.encode(prompt).ids for prompt in prompts]
+        batch_size = len(prompt_tokens)
+        assert batch_size <= self.config.max_batch_size
+
+        min_prompt_len = min(len(t) for t in prompt_tokens)
+        max_prompt_len = max(len(t) for t in prompt_tokens)
+        assert max_prompt_len <= self.config.max_seq_len
+
+        total_len = min(self.config.max_seq_len, max_gen_len + max_prompt_len)
+        pad_id = self.config.pad_token_id
+        tokens = torch.full(size=(batch_size, total_len), fill_value=pad_id, dtype=torch.int64)
+        for k, t in enumerate(prompt_tokens):
+            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.int64)
+
+        prev_pos = 0
+        eos_id = self.config.eos_token_id
+        eos_reached = torch.tensor([False] * batch_size)
+        input_text_mask = torch.ne(tokens, pad_id)
+        for curr_pos in range(min_prompt_len, total_len):
+            with torch.inference_mode():
+                logits = self.model(tokens[:, prev_pos:curr_pos], start_pos=prev_pos)
+
+            if temperature > 0:
+                probs = torch.softmax(torch.div(logits[:, -1, :], temperature), dim=-1)
+                next_tokens = sample_top_p(probs, top_p).reshape(-1)
+            else:
+                next_tokens = torch.argmax(logits[:, -1, :], dim=-1)
+            next_tokens = torch.where(condition=input_text_mask[:, curr_pos], input=tokens[:, curr_pos], other=next_tokens)
+            tokens[:, curr_pos] = next_tokens
+
+            eos_reached = torch.logical_or(eos_reached, torch.logical_and(torch.logical_not(input_text_mask[:, curr_pos]), torch.eq(next_tokens, eos_id)))
+            prev_pos = curr_pos
+            if all(eos_reached):
+                break
+
+        tokens = tokens.tolist()
+        prompt_lengths = [len(t) for t in prompt_tokens]
+        split_tokens = [(output[:length], output[length:]) for output, length in zip(tokens, prompt_lengths)]
+        return list(map(self.tokenizer.decode_batch, split_tokens))
+
+
 def main(
         ckpt_dir: str = "/home/junjinyong/Desktop/Qwen3-30B-A3B/",
         tokenizer_path: str = "/home/junjinyong/Desktop/Qwen3-30B-A3B/tokenizer.json",
         config_path: Optional[str] = None,
 ):
-    data = None
-    if config_path is not None:
-        with open(config_path, "r") as f:
-            data = json.load(f)
-    config = Qwen3MoeConfig.from_dict(data)
+    qwen3_moe = Qwen3MoE(ckpt_dir=ckpt_dir, tokenizer_path=tokenizer_path, config_path=config_path)
+    prompts = [
+        "Four score and seven years ago our fathers brought",
+        "We hold these truths to be",
+        "I have a dream that one day this nation will",
+        "The only thing we have to fear is"
+    ]
+    responses = qwen3_moe.generate(prompts, max_gen_len=32, temperature=0.4, top_p=0.8)
 
-    ckpt_paths = sorted(Path(ckpt_dir).glob("*.safetensors"))
-    state_dict = {
-        (key[len("model."): ] if key.startswith("model.") else key): value
-        for ckpt_path in ckpt_paths
-        for key, value in load_file(ckpt_path, device="cpu").items()
-    }
-
-    torch.set_default_dtype(torch.float16)
-    model = Qwen3MoeModel(config)
-    model.load_state_dict(state_dict, strict=True)
-    model.eval()
-    tokenizer = Tokenizer.from_file(tokenizer_path)
-
-    prompt = "Four score and seven years ago our fathers brought forth on this continent, a new nation, conceived in Liberty, and dedicated to the proposition that all men are created equal."
-    prompt = "Four score and seven years ago our fathers brought"
-    print("prompt:", prompt)
-
-    prompts = [prompt]
-    tokens = torch.tensor([tokenizer.encode(prompt).ids for prompt in prompts], dtype=torch.int64, device=torch.device("cpu"))
-    logits = model(tokens)
-    save_file({"logits": logits}, "result.safetensors")
-
-    next_token_logits = logits[0, -1]
-    probs = torch.softmax(next_token_logits, dim=-1)
-    topk = torch.topk(probs, k=5)
-    top_tokens = list(map(tokenizer.id_to_token, topk.indices.tolist()))
-    top_probs = topk.values.tolist()
-    for token, prob in zip(top_tokens, top_probs):
-        print(f"{token!r}: {prob:.4f}")
+    for prompt, completion in responses:
+        print("\033[31m" + prompt + "\033[0m" + completion + "\n")
 
 
 if __name__ == "__main__":

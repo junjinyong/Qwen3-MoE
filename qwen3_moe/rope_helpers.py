@@ -1,20 +1,22 @@
 # SPDX-FileCopyrightText: © 2023
 # SPDX-License-Identifier: MIT
 
-from typing import Tuple, Any
-
+from typing import Tuple
 import torch
 
+from utils.structural_types import StructuralTypeA
 
-def precompute_freqs_cis(config: Any):
+
+def precompute_freqs_cis(config: StructuralTypeA):
     theta = config.rope_theta
     dim = config.head_dim
+    max_seq_len = config.max_seq_len
 
-    indices = torch.arange(start=0, end=dim, step=2, dtype=torch.float32, requires_grad=False)[: (dim // 2)] / dim
+    indices = torch.div(torch.arange(start=0, end=dim, step=2, dtype=torch.int64).to(dtype=torch.float32)[: (dim // 2)], dim)
     freqs = torch.reciprocal(torch.pow(theta, indices)).to(dtype=torch.float32)
-    t = torch.arange(start=0, end=config.max_seq_len, step=1, dtype=torch.float32, requires_grad=False)  # type: ignore
-    freqs = torch.outer(t, freqs).to(dtype=torch.float32)  # type: ignore
-    freqs_cis = torch.polar(abs=torch.ones_like(input=freqs, dtype=torch.float32), angle=torch.neg(freqs))  # complex64
+    t = torch.arange(start=0, end=max_seq_len, step=1, dtype=torch.int64).to(dtype=torch.float32)
+    freqs = torch.outer(t, freqs).to(dtype=torch.float32)
+    freqs_cis = torch.polar(abs=torch.ones_like(input=freqs, dtype=torch.float32), angle=torch.neg(freqs))
     return freqs_cis
 
 
