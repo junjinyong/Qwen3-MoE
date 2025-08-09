@@ -27,8 +27,8 @@ class Qwen3MoeAttention(nn.Module):
         self.sliding_window = None
 
         cache_shape = (config.max_batch_size, config.max_seq_len, self.num_key_value_heads, self.head_dim)
-        cache_k = torch.zeros(cache_shape, dtype=torch.float16, requires_grad=False)
-        cache_v = torch.zeros(cache_shape, dtype=torch.float16, requires_grad=False)
+        cache_k = torch.zeros(cache_shape, dtype=torch.float16, device=torch.device("cpu"), requires_grad=False)
+        cache_v = torch.zeros(cache_shape, dtype=torch.float16, device=torch.device("cpu"), requires_grad=False)
         self.register_buffer('cache_k', cache_k, persistent=False)
         self.register_buffer('cache_v', cache_v, persistent=False)
 

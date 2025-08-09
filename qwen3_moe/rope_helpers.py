@@ -12,11 +12,12 @@ def precompute_freqs_cis(config: StructuralTypeA):
     dim = config.head_dim
     max_seq_len = config.max_seq_len
 
-    indices = torch.div(torch.arange(start=0, end=dim, step=2, dtype=torch.int64).to(dtype=torch.float32)[: (dim // 2)], dim)
-    freqs = torch.reciprocal(torch.pow(theta, indices)).to(dtype=torch.float32)
-    t = torch.arange(start=0, end=max_seq_len, step=1, dtype=torch.int64).to(dtype=torch.float32)
-    freqs = torch.outer(t, freqs).to(dtype=torch.float32)
-    freqs_cis = torch.polar(abs=torch.ones_like(input=freqs, dtype=torch.float32), angle=torch.neg(freqs))
+    with torch.device("cpu"), torch.no_grad():
+        indices = torch.div(torch.arange(start=0, end=dim, step=2, dtype=torch.int64).to(dtype=torch.float32)[: (dim // 2)], dim)
+        freqs = torch.reciprocal(torch.pow(theta, indices)).to(dtype=torch.float32)
+        t = torch.arange(start=0, end=max_seq_len, step=1, dtype=torch.int64).to(dtype=torch.float32)
+        freqs = torch.outer(t, freqs).to(dtype=torch.float32)
+        freqs_cis = torch.polar(abs=torch.ones_like(input=freqs, dtype=torch.float32), angle=torch.neg(freqs))
     return freqs_cis
 
 

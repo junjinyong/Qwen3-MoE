@@ -9,6 +9,8 @@ from tokenizers import Tokenizer
 from qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel
 
+from utils.loader import load, materialize
+
 
 def sample_top_p(probs, p):
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
@@ -33,16 +35,12 @@ class Qwen3MoE:
                 data = json.load(f)
 
         self.config = Qwen3MoeConfig.from_dict(data)
-        self.model = Qwen3MoeModel(self.config)
+        with torch.device("meta"):
+            self.model = Qwen3MoeModel(self.config)
         self.tokenizer = Tokenizer.from_file(tokenizer_path)
 
-        ckpt_paths = sorted(Path(ckpt_dir).glob("*.safetensors"))
-        state_dict = {
-            (key[len("model."):] if key.startswith("model.") else key): value
-            for ckpt_path in ckpt_paths
-            for key, value in load_file(ckpt_path, device="cpu").items()
-        }
-        self.model.load_state_dict(state_dict, strict=True)
+        materialize(self.model)
+        load(ckpt_dir, self.model)
         self.model.eval()
 
     def generate(self, prompts: List[str], max_gen_len: int, temperature: float = 0.6, top_p: float = 0.9) -> List[List[str]]:
