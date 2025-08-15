@@ -1,7 +1,7 @@
 import fire
 from typing import Optional
 
-from generation import Qwen3MoE
+from cpu.generation import Qwen3MoE
 
 
 def main(
