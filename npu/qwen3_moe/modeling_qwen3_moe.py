@@ -2,9 +2,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from cpu.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
-from cpu.transformers.sdpa_attention import sdpa_attention_forward
-from cpu.qwen3_moe.rope_helpers import precompute_freqs_cis, apply_rotary_emb
+from npu.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
+from npu.transformers.sdpa_attention import sdpa_attention_forward
+from npu.qwen3_moe.rope_helpers import precompute_freqs_cis, apply_rotary_emb
 
 
 class Qwen3MoeAttention(nn.Module):

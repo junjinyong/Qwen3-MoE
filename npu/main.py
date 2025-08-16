@@ -1,12 +1,12 @@
 import fire
 from typing import Optional
 
-from cpu.generation import Qwen3MoE
+from npu.generation import Qwen3MoE
 
 
 def main(
-        ckpt_dir: str = "/home/junjinyong/Desktop/Qwen3-30B-A3B/",
-        tokenizer_path: str = "/home/junjinyong/Desktop/Qwen3-30B-A3B/tokenizer.json",
+        ckpt_dir: str = "/home/jinyong/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39",
+        tokenizer_path: str = "/home/jinyong/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/tokenizer.json",
         config_path: Optional[str] = None,
 ):
     qwen3_moe = Qwen3MoE(ckpt_dir=ckpt_dir, tokenizer_path=tokenizer_path, config_path=config_path)
