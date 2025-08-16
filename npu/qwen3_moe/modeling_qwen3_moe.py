@@ -9,6 +9,29 @@ from npu.transformers.sdpa_attention import sdpa_attention_forward
 from npu.qwen3_moe.rope_helpers import precompute_freqs_cis, apply_rotary_emb
 
 
+class Qwen3MoeRMSNorm__:
+    def __init__(self):
+        super().__init__()
+        self.weight = None
+        self.epsilon = None
+        self.device = None
+
+    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
+        self.weight = ttnn.as_tensor(
+            torch_weight,
+            dtype=ttnn.bfloat16,
+            device=device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            layout=ttnn.TILE_LAYOUT,
+        )
+        self.epsilon = 1e-6
+        self.device = device
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        x = ttnn.as_tensor(x, dtype=ttnn.float32, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.to_torch(ttnn.rms_norm(x, epsilon=self.epsilon, weight=self.weight), dtype=torch.float16)
+
+
 class Qwen3MoeAttention(nn.Module):
     def __init__(self, config: Qwen3MoeConfig, layer_idx: int):
         super().__init__()
@@ -229,7 +252,7 @@ class Qwen3MoeModel(nn.Module):
 
         self.embed_tokens = Qwen3Embedding()
         self.layers = nn.ModuleList([Qwen3MoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        self.norm = Qwen3MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = Qwen3MoeRMSNorm__()
         self.lm_head = QWen3Linear()
 
         position_embeddings = precompute_freqs_cis(config)
