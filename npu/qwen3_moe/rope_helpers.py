@@ -4,7 +4,7 @@
 from typing import Tuple
 import torch
 
-from cpu.utils.structural_types import StructuralTypeA
+from npu.utils.structural_types import StructuralTypeA
 
 
 def precompute_freqs_cis(config: StructuralTypeA):

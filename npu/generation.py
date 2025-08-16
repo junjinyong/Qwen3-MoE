@@ -7,7 +7,7 @@ from tokenizers import Tokenizer
 from npu.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from npu.qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel
 
-from utils.loader import load, materialize
+from npu.utils.loader import load, materialize
 
 
 def sample_top_p(probs, p):
