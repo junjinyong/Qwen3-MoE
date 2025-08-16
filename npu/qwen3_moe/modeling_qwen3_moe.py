@@ -188,17 +188,36 @@ class Qwen3Embedding:
             torch_weight,
             dtype=ttnn.bfloat16,
             device=device,
-#            mesh_mapper=ttnn.ShardTensor2dMesh(device, device.shape, (2, 1)),
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
         self.device = device
 
 
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
         x = ttnn.as_tensor(x, dtype=ttnn.uint32, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         return ttnn.to_torch(ttnn.embedding(x, self.weight), dtype=torch.float16)
 
+
+class QWen3Linear:
+    def __init__(self):
+        super().__init__()
+        self.weight = None
+        self.device = None
+
+    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
+        self.weight = ttnn.as_tensor(
+            torch_weight,
+            dtype=ttnn.bfloat16,
+            device=device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            layout=ttnn.TILE_LAYOUT,
+        )
+        self.device = device
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        x = ttnn.as_tensor(x, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.to_torch(ttnn.linear(x, self.weight, transpose_b=True, bias=None), dtype=torch.float16)
 
 class Qwen3MoeModel(nn.Module):
     def __init__(self, config: Qwen3MoeConfig):
@@ -211,7 +230,7 @@ class Qwen3MoeModel(nn.Module):
         self.embed_tokens = Qwen3Embedding()
         self.layers = nn.ModuleList([Qwen3MoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = Qwen3MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = QWen3Linear()
 
         position_embeddings = precompute_freqs_cis(config)
         self.register_buffer('position_embeddings', position_embeddings, persistent=False)

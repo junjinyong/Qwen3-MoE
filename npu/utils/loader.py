@@ -18,6 +18,9 @@ def load_shard(ckpt_path: Path, model: nn.Module, device: ttnn.Device) -> None:
             if key == "model.embed_tokens.weight":
                 model.embed_tokens.load(source, device)
                 continue
+            if key == "lm_head.weight":
+                model.lm_head.load(source, device)
+                continue
 
             key = key[len("model."):] if key.startswith("model.") else key
             target: torch.Tensor = state_dict[key]
