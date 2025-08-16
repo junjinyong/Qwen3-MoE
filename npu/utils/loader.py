@@ -2,14 +2,22 @@ from typing import Dict, Optional
 from pathlib import Path
 import torch
 import torch.nn as nn
+import ttnn
 from safetensors.torch import safe_open
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-def load_shard(ckpt_path: Path, state_dict: Dict[str, torch.Tensor]) -> None:
+def load_shard(ckpt_path: Path, model: nn.Module, device: ttnn.Device) -> None:
+    with torch.no_grad():
+        state_dict = dict(model.named_parameters())
+
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
         for key in f.keys():
             source: torch.Tensor = f.get_tensor(key)
+
+            if key == "model.embed_tokens.weight":
+                model.embed_tokens.load(source, device)
+                continue
 
             key = key[len("model."):] if key.startswith("model.") else key
             target: torch.Tensor = state_dict[key]
@@ -19,10 +27,8 @@ def load_shard(ckpt_path: Path, state_dict: Dict[str, torch.Tensor]) -> None:
                 target.copy_(source.to(dtype=torch.float16))
 
 
-def load(ckpt_dir: str, model: nn.Module, io_workers: int = 4, blas_workers: int = 2) -> None:
+def load(ckpt_dir: str, model: nn.Module, device: ttnn.Device, io_workers: int = 4, blas_workers: int = 2) -> None:
     ckpt_paths = sorted(Path(ckpt_dir).glob("*.safetensors"))
-    with torch.no_grad():
-        state_dict = dict(model.named_parameters())
 
     num_threads = torch.get_num_threads()
     torch.set_num_threads(blas_workers)
@@ -30,10 +36,10 @@ def load(ckpt_dir: str, model: nn.Module, io_workers: int = 4, blas_workers: int
     with torch.no_grad():
         if io_workers == 1:
             for ckpt_path in ckpt_paths:
-                load_shard(ckpt_path, state_dict)
+                load_shard(ckpt_path, model)
         else:
             with ThreadPoolExecutor(max_workers=io_workers) as ex:
-                futures = [ex.submit(load_shard, ckpt_path, state_dict) for ckpt_path in ckpt_paths]
+                futures = [ex.submit(load_shard, ckpt_path, model, device) for ckpt_path in ckpt_paths]
                 for fut in as_completed(futures):
                     _ = fut.result()
 

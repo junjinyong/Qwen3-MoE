@@ -1,6 +1,8 @@
 import fire
 from typing import Optional
 
+import ttnn
+
 from npu.generation import Qwen3MoE
 
 
@@ -9,7 +11,10 @@ def main(
         tokenizer_path: str = "/home/jinyong/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/tokenizer.json",
         config_path: Optional[str] = None,
 ):
-    qwen3_moe = Qwen3MoE(ckpt_dir=ckpt_dir, tokenizer_path=tokenizer_path, config_path=config_path)
+    device_id = 0
+    device = ttnn.open_device(device_id=device_id)
+
+    qwen3_moe = Qwen3MoE(ckpt_dir=ckpt_dir, tokenizer_path=tokenizer_path, config_path=config_path, device=device)
     prompts = [
         "Four score and seven years ago our fathers brought",
         "We hold these truths to be",
@@ -20,6 +25,8 @@ def main(
 
     for prompt, completion in responses:
         print("\033[31m" + prompt + "\033[0m" + completion + "\n")
+
+    ttnn.close_device(device)
 
 
 if __name__ == "__main__":

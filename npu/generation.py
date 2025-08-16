@@ -1,6 +1,7 @@
 import json
 from typing import Optional, List
 import torch
+import ttnn
 
 from tokenizers import Tokenizer
 
@@ -22,7 +23,7 @@ def sample_top_p(probs, p):
 
 
 class Qwen3MoE:
-    def __init__(self, ckpt_dir: str, tokenizer_path: str, config_path: Optional[str] = None) -> None:
+    def __init__(self, ckpt_dir: str, tokenizer_path: str, config_path: Optional[str], device: ttnn.Device) -> None:
         torch.manual_seed(42)
         torch.set_default_device(torch.device("cpu"))
         torch.set_default_dtype(torch.float16)
@@ -38,7 +39,7 @@ class Qwen3MoE:
         self.tokenizer = Tokenizer.from_file(tokenizer_path)
 
         materialize(self.model)
-        load(ckpt_dir, self.model)
+        load(ckpt_dir, self.model, device)
         self.model.eval()
 
     def generate(self, prompts: List[str], max_gen_len: int, temperature: float = 0.6, top_p: float = 0.9) -> List[List[str]]:

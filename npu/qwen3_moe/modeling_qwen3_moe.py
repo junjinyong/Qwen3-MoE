@@ -2,6 +2,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import ttnn
+
 from npu.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from npu.transformers.sdpa_attention import sdpa_attention_forward
 from npu.qwen3_moe.rope_helpers import precompute_freqs_cis, apply_rotary_emb
@@ -174,6 +176,30 @@ class Qwen3MoeDecoderLayer(nn.Module):
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
         return hidden_states
 
+
+class Qwen3Embedding:
+    def __init__(self):
+        super().__init__()
+        self.weight = None
+        self.device = None
+
+    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
+        self.weight = ttnn.as_tensor(
+            torch_weight,
+            dtype=ttnn.bfloat16,
+            device=device,
+#            mesh_mapper=ttnn.ShardTensor2dMesh(device, device.shape, (2, 1)),
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+        )
+        self.device = device
+
+
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        x = ttnn.as_tensor(x, dtype=ttnn.uint32, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.to_torch(ttnn.embedding(x, self.weight), dtype=torch.float16)
+
+
 class Qwen3MoeModel(nn.Module):
     def __init__(self, config: Qwen3MoeConfig):
         super().__init__()
@@ -182,7 +208,7 @@ class Qwen3MoeModel(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.embed_tokens = Qwen3Embedding()
         self.layers = nn.ModuleList([Qwen3MoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = Qwen3MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
