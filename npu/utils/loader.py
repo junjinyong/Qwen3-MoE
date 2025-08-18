@@ -11,6 +11,10 @@ PATTERN_1 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.input_layernorm\.weight$'
 PATTERN_2 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.post_attention_layernorm\.weight$')
 PATTERN_3 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.self_attn\.q_norm.weight$')
 PATTERN_4 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.self_attn\.k_norm.weight$')
+PATTERN_5 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.self_attn\.q_proj.weight$')
+PATTERN_6 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.self_attn\.k_proj.weight$')
+PATTERN_7 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.self_attn\.v_proj.weight$')
+PATTERN_8 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.self_attn\.o_proj.weight$')
 
 
 def owner_of(i: int, n_items: int, n_parts: int) -> int:
@@ -59,6 +63,22 @@ def load_shard(ckpt_path: Path, model: nn.Module, devices: Dict[int, ttnn.MeshDe
                 layer_index = int(m['idx'])
                 device = devices[partially_applied_owner_of(layer_index)]
                 model.layers[layer_index].self_attn.k_norm.load(source, device)
+            elif m := PATTERN_5.fullmatch(key):
+                layer_index = int(m['idx'])
+                device = devices[partially_applied_owner_of(layer_index)]
+                model.layers[layer_index].self_attn.q_proj.load(source, device)
+            elif m := PATTERN_6.fullmatch(key):
+                layer_index = int(m['idx'])
+                device = devices[partially_applied_owner_of(layer_index)]
+                model.layers[layer_index].self_attn.k_proj.load(source, device)
+            elif m := PATTERN_7.fullmatch(key):
+                layer_index = int(m['idx'])
+                device = devices[partially_applied_owner_of(layer_index)]
+                model.layers[layer_index].self_attn.v_proj.load(source, device)
+            elif m := PATTERN_8.fullmatch(key):
+                layer_index = int(m['idx'])
+                device = devices[partially_applied_owner_of(layer_index)]
+                model.layers[layer_index].self_attn.o_proj.load(source, device)
             else:
                 key = key[len("model."):] if key.startswith("model.") else key
                 target: torch.Tensor = state_dict[key]
@@ -70,7 +90,7 @@ def load_shard(ckpt_path: Path, model: nn.Module, devices: Dict[int, ttnn.MeshDe
 
 
 
-def load(ckpt_dir: str, model: nn.Module, device: ttnn.Device, io_workers: int = 4, blas_workers: int = 2) -> None:
+def load(ckpt_dir: str, model: nn.Module, devices: Dict[int, ttnn.MeshDevice], io_workers: int = 4, blas_workers: int = 2) -> None:
     ckpt_paths = sorted(Path(ckpt_dir).glob("*.safetensors"))
 
     num_threads = torch.get_num_threads()
@@ -79,10 +99,10 @@ def load(ckpt_dir: str, model: nn.Module, device: ttnn.Device, io_workers: int =
     with torch.no_grad():
         if io_workers == 1:
             for ckpt_path in ckpt_paths:
-                load_shard(ckpt_path, model)
+                load_shard(ckpt_path, model, devices)
         else:
             with ThreadPoolExecutor(max_workers=io_workers) as ex:
-                futures = [ex.submit(load_shard, ckpt_path, model, device) for ckpt_path in ckpt_paths]
+                futures = [ex.submit(load_shard, ckpt_path, model, devices) for ckpt_path in ckpt_paths]
                 for fut in as_completed(futures):
                     _ = fut.result()
 

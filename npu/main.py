@@ -11,8 +11,8 @@ def main(
         tokenizer_path: str = "/home/jinyong/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/tokenizer.json",
         config_path: Optional[str] = None,
 ):
-    print(f"\033[31m \033[43mAvailable devices: {ttnn.GetNumAvailableDevices()}\033[0m")
-    print(f"\033[31m \033[43mPCIe devices: {ttnn.GetNumPCIeDevices()}\033[0m")
+    print("\033[31m \033[43m" + f"Available devices: {ttnn.GetNumAvailableDevices()}" + "\033[0m")
+    print("\033[31m \033[43m" + f"PCIe devices: {ttnn.GetNumPCIeDevices()}" + "\033[0m")
     assert ttnn.GetNumPCIeDevices() == 4
 
     device_ids: List[int] = [0, 1, 2, 3]
@@ -25,7 +25,7 @@ def main(
         "I have a dream that one day this nation will",
         "The only thing we have to fear is"
     ]
-    responses = qwen3_moe.generate(prompts, max_gen_len=32, temperature=0.4, top_p=0.8)
+    responses = qwen3_moe.generate(prompts, max_gen_len=4, temperature=0.0, top_p=0.8)
 
     for prompt, completion in responses:
         print("\033[31m" + prompt + "\033[0m" + completion + "\n")
