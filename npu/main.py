@@ -14,8 +14,9 @@ def main(
     print("\033[31m \033[43m" + f"Available devices: {ttnn.GetNumAvailableDevices()}" + "\033[0m")
     print("\033[31m \033[43m" + f"PCIe devices: {ttnn.GetNumPCIeDevices()}" + "\033[0m")
     assert ttnn.GetNumPCIeDevices() == 4
+    assert ttnn.GetNumAvailableDevices() == 8
 
-    device_ids: List[int] = [0, 1, 2, 3]
+    device_ids: List[int] = [0, 1, 2, 3, 4, 5, 6, 7]
     devices: Dict[int, ttnn.MeshDevice] = ttnn.CreateDevices(device_ids)
 
     qwen3_moe = Qwen3MoE(ckpt_dir=ckpt_dir, tokenizer_path=tokenizer_path, config_path=config_path, devices=devices)

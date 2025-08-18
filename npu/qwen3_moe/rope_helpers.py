@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: © 2023
 # SPDX-License-Identifier: MIT
 
-from typing import Tuple
+from typing import Tuple, Union
 import torch
+import ttnn
 
 from npu.utils.structural_types import StructuralTypeA
 
@@ -29,10 +30,15 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
 
 
 def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
+    xq: Union[torch.Tensor, ttnn.Tensor],
+    xk: Union[torch.Tensor, ttnn.Tensor],
     freqs_cis: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if isinstance(xq, ttnn.Tensor):
+        xq = ttnn.to_torch(xq, dtype=torch.float16)
+    if isinstance(xk, ttnn.Tensor):
+        xk = ttnn.to_torch(xk, dtype=torch.float16)
+
     xq_ = torch.view_as_complex(xq.reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)

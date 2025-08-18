@@ -2,6 +2,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from typing import Union, Dict
+
 import ttnn
 
 from npu.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
@@ -25,9 +27,10 @@ class Embedding:
         )
         self.device = device
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        x = ttnn.as_tensor(x, dtype=ttnn.uint32, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        return ttnn.to_torch(ttnn.embedding(x, self.weight), dtype=torch.float16)
+    def __call__(self, x: Union[torch.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
+        if isinstance(x, torch.Tensor):
+            x = ttnn.as_tensor(x, dtype=ttnn.uint32, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.to_layout(ttnn.embedding(x, self.weight), layout=ttnn.TILE_LAYOUT)
 
 
 class Linear:
@@ -46,9 +49,10 @@ class Linear:
         )
         self.device = device
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        x = ttnn.as_tensor(x, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        return ttnn.to_torch(ttnn.linear(x, self.weight, transpose_b=True, bias=None), dtype=torch.float16)
+    def __call__(self, x: Union[torch.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
+        if isinstance(x, torch.Tensor):
+            x = ttnn.as_tensor(x, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.linear(x, self.weight, transpose_b=True, bias=None)
 
 
 class RMSNorm:
@@ -69,9 +73,10 @@ class RMSNorm:
         self.epsilon = 1e-6
         self.device = device
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        x = ttnn.as_tensor(x, dtype=ttnn.float32, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        return ttnn.to_torch(ttnn.rms_norm(x, epsilon=self.epsilon, weight=self.weight), dtype=torch.float16)
+    def __call__(self, x: Union[torch.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
+        if isinstance(x, torch.Tensor):
+            x = ttnn.as_tensor(x, dtype=ttnn.float32, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.rms_norm(x, epsilon=self.epsilon, weight=self.weight)
 
 
 class Attention:
@@ -105,20 +110,26 @@ class Attention:
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, ttnn.Tensor],
         start_pos: int,
         position_embeddings: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> torch.Tensor:
+        if isinstance(hidden_states, ttnn.Tensor):
+            hidden_states = ttnn.to_torch(hidden_states, dtype=torch.float16)
+
         batch_size, seq_len, _ = hidden_states.shape
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim) # [batch_size, seq_len, -1, head_dim]
 
-        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
-        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
-        value_states = self.v_proj(hidden_states).view(hidden_shape)
+        query_states = self.q_norm(ttnn.to_torch(self.q_proj(hidden_states), dtype=torch.float16).view(hidden_shape))
+        key_states = self.k_norm(ttnn.to_torch(self.k_proj(hidden_states), dtype=torch.float16).view(hidden_shape))
+        value_states = ttnn.to_torch(self.v_proj(hidden_states), dtype=torch.float16).view(hidden_shape)
 
         query_states, key_states = apply_rotary_emb(query_states, key_states, position_embeddings)
+
+        #query_states = ttnn.to_torch(query_states, dtype=torch.float16)
+        #key_states = ttnn.to_torch(key_states, dtype=torch.float16)
 
         self.cache_k[:batch_size, start_pos:start_pos + seq_len] = key_states
         self.cache_v[:batch_size, start_pos:start_pos + seq_len] = value_states
@@ -137,20 +148,20 @@ class Attention:
         return attn_output
 
 
-class Qwen3MoeMLP(nn.Module):
+class Qwen3MoeMLP:
     def __init__(self, config: Qwen3MoeConfig, intermediate_size: int):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = nn.SiLU()
+        self.gate_proj = Linear()
+        self.up_proj = Linear()
+        self.down_proj = Linear()
+        self.act_fn = ttnn.silu
         assert config.hidden_act == "silu"
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(torch.mul(self.act_fn(self.gate_proj(x)), self.up_proj(x)))
+    def forward(self, x: Union[torch.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
+        return self.down_proj(ttnn.multiply(self.act_fn(self.gate_proj(x)), self.up_proj(x)))
 
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
@@ -161,11 +172,14 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.norm_topk_prob = config.norm_topk_prob
 
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
-        self.experts = nn.ModuleList([Qwen3MoeMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(self.num_experts)])
+        self.experts = [Qwen3MoeMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(self.num_experts)]
 
         self.layer_idx = layer_idx
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: Union[torch.Tensor, ttnn.Tensor]) -> torch.Tensor:
+        if isinstance(hidden_states, ttnn.Tensor):
+            hidden_states = ttnn.to_torch(hidden_states, dtype=torch.float16)
+
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -186,7 +200,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
 
             current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
-            current_hidden_states = torch.mul(expert_layer(current_state), routing_weights[top_x, idx, None])
+            current_hidden_states = torch.mul(ttnn.to_torch(expert_layer.forward(current_state), dtype=torch.float16), routing_weights[top_x, idx, None])
 
             final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
@@ -210,26 +224,29 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, ttnn.Tensor],
         start_pos: int,
         position_embeddings: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_states = hidden_states + self.self_attn.forward(
+        if isinstance(hidden_states, ttnn.Tensor):
+            hidden_states = ttnn.to_torch(hidden_states, dtype=torch.float16)
+        hidden_states = hidden_states + ttnn.to_torch(self.self_attn.forward(
             hidden_states=self.input_layernorm(hidden_states),
             start_pos=start_pos,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask
-        )
+        ), dtype=torch.float16)
 
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
         return hidden_states
 
 
 class Qwen3MoeModel(nn.Module):
-    def __init__(self, config: Qwen3MoeConfig):
+    def __init__(self, config: Qwen3MoeConfig, devices: Dict[int, ttnn.MeshDevice]):
         super().__init__()
         self.config = config
+        self.devices = devices
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -265,6 +282,8 @@ class Qwen3MoeModel(nn.Module):
 
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
+        if isinstance(logits, ttnn.Tensor):
+            logits = ttnn.to_torch(logits, dtype=torch.float16)
         return logits
 
 __all__ = ["Qwen3MoeModel"]

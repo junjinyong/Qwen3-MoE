@@ -35,7 +35,7 @@ class Qwen3MoE:
 
         self.config = Qwen3MoeConfig.from_dict(data)
         with torch.device("meta"):
-            self.model = Qwen3MoeModel(self.config)
+            self.model = Qwen3MoeModel(self.config, devices)
         self.tokenizer = Tokenizer.from_file(tokenizer_path)
 
         materialize(self.model)
