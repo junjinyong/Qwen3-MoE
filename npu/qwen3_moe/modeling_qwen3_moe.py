@@ -9,7 +9,7 @@ from npu.transformers.sdpa_attention import sdpa_attention_forward
 from npu.qwen3_moe.rope_helpers import precompute_freqs_cis, apply_rotary_emb
 
 
-class Qwen3MoeRMSNorm__:
+class Qwen3MoeRMSNorm:
     def __init__(self):
         super().__init__()
         self.weight = None
@@ -47,8 +47,8 @@ class Qwen3MoeAttention(nn.Module):
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
-        self.q_norm = Qwen3MoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
-        self.k_norm = Qwen3MoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
+        self.q_norm = Qwen3MoeRMSNorm()
+        self.k_norm = Qwen3MoeRMSNorm()
         self.sliding_window = None
 
         cache_shape = (config.max_batch_size, config.max_seq_len, self.num_key_value_heads, self.head_dim)
@@ -153,20 +153,6 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         return final_hidden_states
 
 
-class Qwen3MoeRMSNorm(nn.Module):
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = torch.mul(hidden_states, torch.rsqrt(variance + self.variance_epsilon))
-        return torch.mul(self.weight, hidden_states.to(input_dtype))
-
-
 class Qwen3MoeDecoderLayer(nn.Module):
     def __init__(self, config: Qwen3MoeConfig, layer_idx: int):
         super().__init__()
@@ -179,8 +165,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
         assert config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         self.mlp = Qwen3MoeSparseMoeBlock(config, layer_idx)
 
-        self.input_layernorm = Qwen3MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen3MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = Qwen3MoeRMSNorm()
+        self.post_attention_layernorm = Qwen3MoeRMSNorm()
 
     def forward(
         self,
@@ -216,7 +202,6 @@ class Qwen3Embedding:
         )
         self.device = device
 
-
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         x = ttnn.as_tensor(x, dtype=ttnn.uint32, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         return ttnn.to_torch(ttnn.embedding(x, self.weight), dtype=torch.float16)
@@ -242,6 +227,7 @@ class QWen3Linear:
         x = ttnn.as_tensor(x, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         return ttnn.to_torch(ttnn.linear(x, self.weight, transpose_b=True, bias=None), dtype=torch.float16)
 
+
 class Qwen3MoeModel(nn.Module):
     def __init__(self, config: Qwen3MoeConfig):
         super().__init__()
@@ -252,7 +238,7 @@ class Qwen3MoeModel(nn.Module):
 
         self.embed_tokens = Qwen3Embedding()
         self.layers = nn.ModuleList([Qwen3MoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        self.norm = Qwen3MoeRMSNorm__()
+        self.norm = Qwen3MoeRMSNorm()
         self.lm_head = QWen3Linear()
 
         position_embeddings = precompute_freqs_cis(config)

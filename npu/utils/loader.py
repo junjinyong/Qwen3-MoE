@@ -1,36 +1,73 @@
-from typing import Dict, Optional
+from typing import List, Dict
 from pathlib import Path
 import torch
 import torch.nn as nn
 import ttnn
 from safetensors.torch import safe_open
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
+
+PATTERN_1 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.input_layernorm\.weight$')
+PATTERN_2 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.post_attention_layernorm\.weight$')
+PATTERN_3 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.self_attn\.q_norm.weight$')
+PATTERN_4 = re.compile(r'^model\.layers\.(?P<idx>\d+)\.self_attn\.k_norm.weight$')
 
 
-def load_shard(ckpt_path: Path, model: nn.Module, device: ttnn.Device) -> None:
+def owner_of(i: int, n_items: int, n_parts: int) -> int:
+    if not (0 <= i < n_items):
+        raise IndexError()
+    if n_parts <= 0:
+        raise ValueError()
+
+    q, r = divmod(n_items, n_parts)
+    cutoff = (q + 1) * r
+    return (i // (q + 1)) if i < cutoff else (r + (i - cutoff) // q)
+
+
+def load_shard(ckpt_path: Path, model: nn.Module, devices: Dict[int, ttnn.MeshDevice]) -> None:
+    assert len(devices) == 4
+
     with torch.no_grad():
         state_dict = dict(model.named_parameters())
+
+    def partially_applied_owner_of(i: int) -> int:
+        return owner_of(i, 48, 4)
 
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
         for key in f.keys():
             source: torch.Tensor = f.get_tensor(key)
 
             if key == "model.embed_tokens.weight":
-                model.embed_tokens.load(source, device)
-                continue
-            if key == "lm_head.weight":
-                model.lm_head.load(source, device)
-                continue
-            if key == "model.norm.weight":
-                model.norm.load(source, device)
-                continue
+                model.embed_tokens.load(source, devices[0])
+            elif key == "lm_head.weight":
+                model.lm_head.load(source, devices[3])
+            elif key == "model.norm.weight":
+                model.norm.load(source, devices[3])
+            elif m := PATTERN_1.fullmatch(key):
+                layer_index = int(m['idx'])
+                device = devices[partially_applied_owner_of(layer_index)]
+                model.layers[layer_index].input_layernorm.load(source, device)
+            elif m:= PATTERN_2.fullmatch(key):
+                layer_index = int(m['idx'])
+                device = devices[partially_applied_owner_of(layer_index)]
+                model.layers[layer_index].post_attention_layernorm.load(source, device)
+            elif m:= PATTERN_3.fullmatch(key):
+                layer_index = int(m['idx'])
+                device = devices[partially_applied_owner_of(layer_index)]
+                model.layers[layer_index].self_attn.q_norm.load(source, device)
+            elif m := PATTERN_4.fullmatch(key):
+                layer_index = int(m['idx'])
+                device = devices[partially_applied_owner_of(layer_index)]
+                model.layers[layer_index].self_attn.k_norm.load(source, device)
+            else:
+                key = key[len("model."):] if key.startswith("model.") else key
+                target: torch.Tensor = state_dict[key]
 
-            key = key[len("model."):] if key.startswith("model.") else key
-            target: torch.Tensor = state_dict[key]
+                assert source.shape == target.shape
+                with torch.no_grad():
+                    target.copy_(source.to(dtype=torch.float16))
 
-            assert source.shape == target.shape
-            with torch.no_grad():
-                target.copy_(source.to(dtype=torch.float16))
+
 
 
 def load(ckpt_dir: str, model: nn.Module, device: ttnn.Device, io_workers: int = 4, blas_workers: int = 2) -> None:
