@@ -9,6 +9,48 @@ from npu.transformers.sdpa_attention import sdpa_attention_forward
 from npu.qwen3_moe.rope_helpers import precompute_freqs_cis, apply_rotary_emb
 
 
+class Qwen3Embedding:
+    def __init__(self):
+        super().__init__()
+        self.weight = None
+        self.device = None
+
+    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
+        self.weight = ttnn.as_tensor(
+            torch_weight,
+            dtype=ttnn.bfloat16,
+            device=device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+        )
+        self.device = device
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        x = ttnn.as_tensor(x, dtype=ttnn.uint32, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.to_torch(ttnn.embedding(x, self.weight), dtype=torch.float16)
+
+
+class QWen3Linear:
+    def __init__(self):
+        super().__init__()
+        self.weight = None
+        self.device = None
+
+    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
+        self.weight = ttnn.as_tensor(
+            torch_weight,
+            dtype=ttnn.bfloat16,
+            device=device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            layout=ttnn.TILE_LAYOUT,
+        )
+        self.device = device
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        x = ttnn.as_tensor(x, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.to_torch(ttnn.linear(x, self.weight, transpose_b=True, bias=None), dtype=torch.float16)
+
+
 class Qwen3MoeRMSNorm:
     def __init__(self):
         super().__init__()
@@ -184,48 +226,6 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
         return hidden_states
-
-
-class Qwen3Embedding:
-    def __init__(self):
-        super().__init__()
-        self.weight = None
-        self.device = None
-
-    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
-        self.weight = ttnn.as_tensor(
-            torch_weight,
-            dtype=ttnn.bfloat16,
-            device=device,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-        )
-        self.device = device
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        x = ttnn.as_tensor(x, dtype=ttnn.uint32, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        return ttnn.to_torch(ttnn.embedding(x, self.weight), dtype=torch.float16)
-
-
-class QWen3Linear:
-    def __init__(self):
-        super().__init__()
-        self.weight = None
-        self.device = None
-
-    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
-        self.weight = ttnn.as_tensor(
-            torch_weight,
-            dtype=ttnn.bfloat16,
-            device=device,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            layout=ttnn.TILE_LAYOUT,
-        )
-        self.device = device
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        x = ttnn.as_tensor(x, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        return ttnn.to_torch(ttnn.linear(x, self.weight, transpose_b=True, bias=None), dtype=torch.float16)
 
 
 class Qwen3MoeModel(nn.Module):
