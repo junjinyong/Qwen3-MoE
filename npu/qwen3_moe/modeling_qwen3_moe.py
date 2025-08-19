@@ -76,14 +76,16 @@ class RMSNorm:
     def __call__(self, x: Union[torch.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
         if isinstance(x, torch.Tensor):
             x = ttnn.as_tensor(x, dtype=ttnn.float32, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        else:
+            x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         return ttnn.rms_norm(x, epsilon=self.epsilon, weight=self.weight)
 
 
 class Attention:
-    def __init__(self, config: Qwen3MoeConfig, layer_idx: int):
+    def __init__(self, config: Qwen3MoeConfig, device: ttnn.Device):
         super().__init__()
         self.config = config
-        self.layer_idx = layer_idx
+        self.device = device
         self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
@@ -101,6 +103,8 @@ class Attention:
         cache_shape = (config.max_batch_size, config.max_seq_len, self.num_key_value_heads, self.head_dim)
         self.cache_k = torch.zeros(cache_shape, dtype=torch.float16, device=torch.device("cpu"), requires_grad=False)
         self.cache_v = torch.zeros(cache_shape, dtype=torch.float16, device=torch.device("cpu"), requires_grad=False)
+        #self.cache_k = ttnn.zeros(cache_shape, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
+        #self.cache_v = ttnn.zeros(cache_shape, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
 
         assert config._attn_implementation == "sdpa"
         assert config.num_attention_heads % config.num_key_value_heads == 0
@@ -128,8 +132,8 @@ class Attention:
 
         query_states, key_states = apply_rotary_emb(query_states, key_states, position_embeddings)
 
-        #query_states = ttnn.to_torch(query_states, dtype=torch.float16)
-        #key_states = ttnn.to_torch(key_states, dtype=torch.float16)
+        #query_states = ttnn.as_tensor(query_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
+        #key_states = ttnn.as_tensor(key_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
 
         self.cache_k[:batch_size, start_pos:start_pos + seq_len] = key_states
         self.cache_v[:batch_size, start_pos:start_pos + seq_len] = value_states
@@ -140,6 +144,10 @@ class Attention:
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
+
+        query_states = ttnn.as_tensor(query_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.ROW_MAJOR_LAYOUT)
+        key_states = ttnn.as_tensor(key_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.ROW_MAJOR_LAYOUT)
+        value_states = ttnn.as_tensor(value_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.ROW_MAJOR_LAYOUT)
 
         attn_output = sdpa_attention_forward(query_states, key_states, value_states, attention_mask)
 
@@ -208,12 +216,12 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
 
 class Qwen3MoeDecoderLayer(nn.Module):
-    def __init__(self, config: Qwen3MoeConfig, layer_idx: int):
+    def __init__(self, config: Qwen3MoeConfig, layer_idx: int, device: ttnn.Device):
         super().__init__()
-        self.layer_idx = layer_idx
+        self.device = device
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Attention(config, layer_idx)
+        self.self_attn = Attention(config, device)
 
         assert (config.mlp_only_layers is None) or (layer_idx not in config.mlp_only_layers)
         assert config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
@@ -252,7 +260,7 @@ class Qwen3MoeModel(nn.Module):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = Embedding()
-        self.layers = nn.ModuleList([Qwen3MoeDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([Qwen3MoeDecoderLayer(config, layer_idx, devices[layer_idx // 6]) for layer_idx in range(config.num_hidden_layers)])  # temp
         self.norm = RMSNorm()
         self.lm_head = Linear()
 
@@ -268,11 +276,20 @@ class Qwen3MoeModel(nn.Module):
         batch_size, seq_len = input_ids.shape
 
         position_embeddings = self.position_embeddings[start_pos: start_pos + seq_len]
-        attention_mask = torch.full(size=(1, 1, seq_len, start_pos + seq_len), fill_value=True, dtype=torch.bool).triu_(diagonal=start_pos + 1).logical_not_()
 
         hidden_states = self.embed_tokens(input_ids)
 
         for decoder_layer in self.layers:
+            device = decoder_layer.device
+
+            shape = [batch_size, 1, seq_len, start_pos + seq_len]
+            padded_shape = [batch_size, 1, ((seq_len + 31) // 32) * 32, ((start_pos + seq_len + 31) // 32) * 32]
+            attention_mask = ttnn.full(shape=shape, fill_value=float("-inf"), dtype=ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            attention_mask = ttnn.tilize_with_val_padding(attention_mask, padded_shape, float("-inf"), dtype=ttnn.bfloat16)
+            attention_mask = ttnn.triu(attention_mask, diagonal=start_pos + 1)
+            attention_mask = ttnn.pad(attention_mask, [(0, 0), (0, 0), (0, padded_shape[2] - shape[2]), (0, padded_shape[3] - shape[3])], float("-inf"))
+            attention_mask = ttnn.to_layout(attention_mask, ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
             hidden_states = decoder_layer(
                 hidden_states=hidden_states,
                 start_pos=start_pos,
