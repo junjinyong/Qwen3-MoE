@@ -19,16 +19,18 @@ def sdpa_attention_forward(
     dropout: float = 0.0,
     scaling: Optional[float] = None,
 ) -> torch.Tensor:
-    # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
-    query_shape = query.shape  # [batch_size, num_attention_heads, seq_len, head_dim]
-    key_shape = key.shape  # [batch_size, num_key_value_heads, seq_len, head_dim]
-    value_shape = value.shape  # [batch_size, num_key_value_heads, seq_len, head_dim]
+    query_shape = query.shape
+    key_shape = key.shape
+    value_shape = value.shape
+
     padded_query_shape = (query_shape[0], query_shape[1], ((query_shape[2] + 31) // 32) * 32, ((query_shape[3] + 31) // 32) * 32)
     padded_key_shape = (key_shape[0], key_shape[1], ((key_shape[2] + 31) // 32) * 32, ((key_shape[3] + 31) // 32) * 32)
     padded_value_shape = (value_shape[0], value_shape[1], ((value_shape[2] + 31) // 32) * 32, ((value_shape[3] + 31) // 32) * 32)
+
     query = ttnn.pad(query, [(0, 0), (0, 0), (0, padded_query_shape[2] - query_shape[2]), (0, padded_query_shape[3] - query_shape[3])], 0.0)
     value = ttnn.pad(value, [(0, 0), (0, 0), (0, padded_value_shape[2] - value_shape[2]), (0, padded_value_shape[3] - value_shape[3])], 0.0)
     key = ttnn.pad(key, [(0, 0), (0, 0), (0, padded_key_shape[2] - key_shape[2]), (0, padded_key_shape[3] - key_shape[3])], 0.0)
+
     query = ttnn.to_layout(query, ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
     value = ttnn.to_layout(value, ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
     key = ttnn.to_layout(key, ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
@@ -40,8 +42,8 @@ def sdpa_attention_forward(
         attn_mask=attention_mask,
         is_causal=False,
         scale=scaling
-    )  # [batch_size, num_attention_heads, seq_len, head_dim], padded
-    attn_output = ttnn.to_layout(ttnn.permute(attn_output, dims=(0, 2, 1, 3)), layout=ttnn.ROW_MAJOR_LAYOUT)  # [batch_size, seq_len, num_attention_heads, head_dim], padded
+    )
+    attn_output = ttnn.to_layout(ttnn.permute(attn_output, dims=(0, 2, 1, 3)), layout=ttnn.ROW_MAJOR_LAYOUT)
     attn_output = ttnn.slice(attn_output, [0, 0, 0, 0], [query_shape[0], query_shape[2], query_shape[1], value_shape[3]])
     attn_output = ttnn.to_torch(attn_output, dtype=torch.float16)
 
