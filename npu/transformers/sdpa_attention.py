@@ -19,13 +19,10 @@ def sdpa_attention_forward(
     dropout: float = 0.0,
     scaling: Optional[float] = None,
 ) -> torch.Tensor:
-    #query = query.contiguous()
-    #key = key.contiguous()
-    #value = value.contiguous()
-
-    query_shape = query.shape
-    key_shape = key.shape
-    value_shape = value.shape
+    # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
+    query_shape = query.shape  # [batch_size, num_attention_heads, seq_len, head_dim]
+    key_shape = key.shape  # [batch_size, num_key_value_heads, seq_len, head_dim]
+    value_shape = value.shape  # [batch_size, num_key_value_heads, seq_len, head_dim]
     padded_query_shape = (query_shape[0], query_shape[1], ((query_shape[2] + 31) // 32) * 32, ((query_shape[3] + 31) // 32) * 32)
     padded_key_shape = (key_shape[0], key_shape[1], ((key_shape[2] + 31) // 32) * 32, ((key_shape[3] + 31) // 32) * 32)
     padded_value_shape = (value_shape[0], value_shape[1], ((value_shape[2] + 31) // 32) * 32, ((value_shape[3] + 31) // 32) * 32)
@@ -43,9 +40,9 @@ def sdpa_attention_forward(
         attn_mask=attention_mask,
         is_causal=False,
         scale=scaling
-    )
-    attn_output = ttnn.permute(attn_output, dims=(0, 2, 1, 3))
+    )  # [batch_size, num_attention_heads, seq_len, head_dim], padded
+    attn_output = ttnn.to_layout(ttnn.permute(attn_output, dims=(0, 2, 1, 3)), layout=ttnn.ROW_MAJOR_LAYOUT)  # [batch_size, seq_len, num_attention_heads, head_dim], padded
+    attn_output = ttnn.slice(attn_output, [0, 0, 0, 0], [query_shape[0], query_shape[2], query_shape[1], value_shape[3]])
     attn_output = ttnn.to_torch(attn_output, dtype=torch.float16)
-    attn_output = attn_output[:, :query_shape[2], :, :value_shape[3]]
 
     return attn_output
