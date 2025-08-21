@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from typing import Union, Dict
+from typing import Union, Dict, Tuple
 
 import ttnn
 
@@ -116,7 +116,7 @@ class Attention:
         self,
         hidden_states: Union[torch.Tensor, ttnn.Tensor],
         start_pos: int,
-        position_embeddings: torch.Tensor,
+        position_embeddings: Tuple[ttnn.Tensor, ttnn.Tensor],
         attention_mask: torch.Tensor
     ) -> torch.Tensor:
         if isinstance(hidden_states, ttnn.Tensor):
@@ -130,7 +130,21 @@ class Attention:
         key_states = self.k_norm(ttnn.to_torch(self.k_proj(hidden_states), dtype=torch.float16).view(hidden_shape))
         value_states = ttnn.to_torch(self.v_proj(hidden_states), dtype=torch.float16).view(hidden_shape)
 
+        #print(query_states.shape)
+        #print(key_states.shape)
+        #print(position_embeddings[0].shape)
+        #print(position_embeddings[1].shape)
+
+        query_states = ttnn.to_layout(query_states, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        key_states = ttnn.to_layout(key_states, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        
+        query_states = ttnn.to_layout(query_states, layout=ttnn.ROW_MAJOR_LAYOUT)
+        key_states = ttnn.to_layout(key_states, layout=ttnn.ROW_MAJOR_LAYOUT)
+
         query_states, key_states = apply_rotary_emb(query_states, key_states, position_embeddings)
+
+        query_states = ttnn.to_torch(query_states, dtype=torch.float16)
+        key_states = ttnn.to_torch(key_states, dtype=torch.float16)
 
         #query_states = ttnn.as_tensor(query_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
         #key_states = ttnn.as_tensor(key_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
@@ -140,6 +154,9 @@ class Attention:
 
         key_states = self.cache_k[:batch_size, :start_pos + seq_len]
         value_states = self.cache_v[:batch_size, :start_pos + seq_len]
+
+        #key_states = repeat_kv(key_states, self.num_key_value_groups)
+        #value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
@@ -234,7 +251,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         self,
         hidden_states: Union[torch.Tensor, ttnn.Tensor],
         start_pos: int,
-        position_embeddings: torch.Tensor,
+        position_embeddings: Tuple[ttnn.Tensor, ttnn.Tensor],
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         if isinstance(hidden_states, ttnn.Tensor):
@@ -264,8 +281,9 @@ class Qwen3MoeModel(nn.Module):
         self.norm = RMSNorm()
         self.lm_head = Linear()
 
-        position_embeddings = precompute_freqs_cis(config)
-        self.register_buffer('position_embeddings', position_embeddings, persistent=False)
+        pos_embs_cos, pos_embs_sin = precompute_freqs_cis(config)
+        self.pos_embs_cos = pos_embs_cos
+        self.pos_embs_sin = pos_embs_sin
 
         assert config.sliding_window is None
 
@@ -275,12 +293,17 @@ class Qwen3MoeModel(nn.Module):
     def forward(self, input_ids: torch.LongTensor, start_pos: int = 0) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
 
-        position_embeddings = self.position_embeddings[start_pos: start_pos + seq_len]
+        pos_embs_cos = self.pos_embs_cos[start_pos: start_pos + seq_len]
+        pos_embs_sin = self.pos_embs_sin[start_pos: start_pos + seq_len]
 
         hidden_states = self.embed_tokens(input_ids)
 
         for decoder_layer in self.layers:
             device = decoder_layer.device
+
+            cos = ttnn.from_torch(pos_embs_cos, dtype=ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            sin = ttnn.from_torch(pos_embs_sin, dtype=ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            position_embeddings = cos, sin
 
             shape = [batch_size, 1, seq_len, start_pos + seq_len]
             padded_shape = [batch_size, 1, ((seq_len + 31) // 32) * 32, ((start_pos + seq_len + 31) // 32) * 32]

@@ -29,7 +29,7 @@ def main(
     responses = qwen3_moe.generate(prompts, max_gen_len=4, temperature=0.0, top_p=0.8)
 
     for prompt, completion in responses:
-        print("\033[31m" + prompt + "\033[0m" + completion + "\n")
+        print("\033[31m\033[43m" + prompt + "\033[37m \033[43m" + completion + "\033[0m")
 
     ttnn.CloseDevices(devices)
 

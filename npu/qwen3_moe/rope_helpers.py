@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: © 2023
 # SPDX-License-Identifier: MIT
 
-from typing import Tuple, Union
+from typing import Tuple, Union, Dict, List
 import torch
 import ttnn
 
 from npu.utils.structural_types import StructuralTypeA
 
 
-def precompute_freqs_cis(config: StructuralTypeA):
+def precompute_freqs_cis(config: StructuralTypeA) -> Tuple[ttnn.Tensor, ttnn.Tensor]:
     theta = config.rope_theta
     dim = config.head_dim
     max_seq_len = config.max_seq_len
@@ -19,7 +19,8 @@ def precompute_freqs_cis(config: StructuralTypeA):
         t = torch.arange(start=0, end=max_seq_len, step=1, dtype=torch.int64).to(dtype=torch.float32)
         freqs = torch.outer(t, freqs).to(dtype=torch.float32)
         freqs_cis = torch.polar(abs=torch.ones_like(input=freqs, dtype=torch.float32), angle=torch.neg(freqs))
-    return freqs_cis
+
+    return freqs_cis.real, freqs_cis.imag
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
@@ -30,19 +31,31 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
 
 
 def apply_rotary_emb(
-    xq: Union[torch.Tensor, ttnn.Tensor],
-    xk: Union[torch.Tensor, ttnn.Tensor],
-    freqs_cis: torch.Tensor,
+    xq: ttnn.Tensor,
+    xk: ttnn.Tensor,
+    freqs_cis: Tuple[ttnn.Tensor, ttnn.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if isinstance(xq, ttnn.Tensor):
-        xq = ttnn.to_torch(xq, dtype=torch.float16)
-    if isinstance(xk, ttnn.Tensor):
-        xk = ttnn.to_torch(xk, dtype=torch.float16)
+    xq = ttnn.to_layout(xq, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.float32)
+    xk = ttnn.to_layout(xk, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.float32)
 
-    xq_ = torch.view_as_complex(xq.reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(torch.mul(xq_, freqs_cis)).flatten(3)
-    xk_out = torch.view_as_real(torch.mul(xk_, freqs_cis)).flatten(3)
-    return xq_out.to(dtype=torch.float16), xk_out.to(dtype=torch.float16)
+    def rotate(x: ttnn.Tensor):
+        batch_size, seq_len, num_heads, head_dim = x.shape
+
+        cos, sin = freqs_cis
+        cos = ttnn.reshape(ttnn.repeat(ttnn.reshape(cos, [1, seq_len, 1, head_dim // 2]), [batch_size, 1, num_heads, 1]), [batch_size, seq_len, num_heads, head_dim // 2, 1])
+        sin = ttnn.reshape(ttnn.repeat(ttnn.reshape(sin, [1, seq_len, 1, head_dim // 2]), [batch_size, 1, num_heads, 1]), [batch_size, seq_len, num_heads, head_dim // 2, 1])
+
+        x_ = ttnn.reshape(x, (batch_size, seq_len, num_heads, head_dim // 2, 2))
+        even = ttnn.slice(x_, (0, 0, 0, 0, 0), (batch_size, seq_len, num_heads, head_dim // 2, 1))
+        odd = ttnn.slice(x_, (0, 0, 0, 0, 1), (batch_size, seq_len, num_heads, head_dim // 2, 2))
+
+        real = ttnn.subtract(ttnn.multiply(even, cos), ttnn.multiply(odd, sin))
+        imag = ttnn.add(ttnn.multiply(odd, cos), ttnn.multiply(even, sin))
+        y = ttnn.concat([real, imag], dim=-1)
+
+        return ttnn.reshape(y, (batch_size, seq_len, num_heads, head_dim))
+
+    yq = ttnn.to_layout(rotate(xq), layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16)
+    yk = ttnn.to_layout(rotate(xk), layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16)
+    return yq, yk
 
