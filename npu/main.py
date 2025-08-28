@@ -1,3 +1,5 @@
+import tt_lock  #
+
 import fire
 from typing import List, Dict, Optional
 
@@ -7,8 +9,8 @@ from npu.generation import Qwen3MoE
 
 
 def main(
-        ckpt_dir: str = "/home/jinyong/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39",
-        tokenizer_path: str = "/home/jinyong/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/tokenizer.json",
+        ckpt_dir: str = "/media/qwen3_parameter/Qwen3-30B-A3B",
+        tokenizer_path: str = "/media/qwen3_parameter/Qwen3-30B-A3B/tokenizer.json",
         config_path: Optional[str] = None,
 ):
     print("\033[31m \033[43m" + f"Available devices: {ttnn.GetNumAvailableDevices()}" + "\033[0m")
@@ -29,7 +31,7 @@ def main(
     responses = qwen3_moe.generate(prompts, max_gen_len=4, temperature=0.0, top_p=0.8)
 
     for prompt, completion in responses:
-        print("\033[31m\033[43m" + prompt + "\033[37m \033[43m" + completion + "\033[0m")
+        print("\033[31m\033[43m" + prompt + "\033[36m \033[43m" + completion + "\033[0m")
 
     ttnn.CloseDevices(devices)
 

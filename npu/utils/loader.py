@@ -10,6 +10,7 @@ import re
 PATTERN_LN = re.compile(r'^model\.layers\.(?P<layer_index>\d+)\.(?P<norm_name>input_layernorm|post_attention_layernorm)\.weight$')
 PATTERN_ATTN = re.compile(r'^model\.layers\.(?P<layer_index>\d+)\.self_attn\.(?P<attn_name>q_norm|k_norm|q_proj|k_proj|v_proj|o_proj)\.weight$')
 PATTERN_MLP_PROJ = re.compile(r'^model\.layers\.(?P<layer_index>\d+)\.mlp\.experts\.(?P<expert_index>\d+)\.(?P<proj_name>gate_proj|up_proj|down_proj)\.weight$')
+PATTERN_MOE_GATE = re.compile(r'^model\.layers\.(?P<layer_index>\d+)\.mlp\.gate\.weight$')
 
 
 def owner_of(i: int, n_items: int, n_parts: int) -> int:
@@ -54,6 +55,10 @@ def load_shard(ckpt_path: Path, model: nn.Module, devices: Dict[int, ttnn.MeshDe
                 layer_index, expert_index, proj_name = int(m['layer_index']), int(m['expert_index']), m['proj_name']
                 device = devices[partially_applied_owner_of(layer_index)]
                 getattr(model.layers[layer_index].mlp.experts[expert_index], proj_name).load(source, device)
+            elif m:= PATTERN_MOE_GATE.fullmatch(key):
+                layer_index = int(m['layer_index'])
+                device = devices[partially_applied_owner_of(layer_index)]
+                model.layers[layer_index].mlp.gate.load(source, device)
             else:
                 key = key[len("model."):] if key.startswith("model.") else key
                 target: torch.Tensor = state_dict[key]
