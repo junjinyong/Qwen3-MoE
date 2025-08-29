@@ -173,7 +173,7 @@ class Attention:
         return attn_output
 
 
-class Qwen3MoeMLP:
+class MoeMLP:
     def __init__(self, config: Qwen3MoeConfig, intermediate_size: int):
         super().__init__()
         self.config = config
@@ -189,7 +189,7 @@ class Qwen3MoeMLP:
         return self.down_proj(ttnn.multiply(self.act_fn(self.gate_proj(x)), self.up_proj(x)))
 
 
-class Qwen3MoeSparseMoeBlock:
+class SparseMoeBlock:
     def __init__(self, config: Qwen3MoeConfig, layer_idx: int, device: ttnn.Device):
         super().__init__()
         self.device = device
@@ -199,7 +199,7 @@ class Qwen3MoeSparseMoeBlock:
         self.norm_topk_prob = config.norm_topk_prob
 
         self.gate = Linear()
-        self.experts = [Qwen3MoeMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(self.num_experts)]
+        self.experts = [MoeMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(self.num_experts)]
 
         self.layer_idx = layer_idx
 
@@ -264,7 +264,7 @@ class Qwen3MoeSparseMoeBlock:
         return ttnn.to_torch(final_hidden_states, dtype=torch.float16)
 
 
-class Qwen3MoeDecoderLayer:
+class DecoderLayer:
     def __init__(self, config: Qwen3MoeConfig, layer_idx: int, device: ttnn.Device):
         super().__init__()
         self.device = device
@@ -274,7 +274,7 @@ class Qwen3MoeDecoderLayer:
 
         assert (config.mlp_only_layers is None) or (layer_idx not in config.mlp_only_layers)
         assert config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
-        self.mlp = Qwen3MoeSparseMoeBlock(config, layer_idx, device)
+        self.mlp = SparseMoeBlock(config, layer_idx, device)
 
         self.input_layernorm = RMSNorm()
         self.post_attention_layernorm = RMSNorm()
@@ -299,7 +299,7 @@ class Qwen3MoeDecoderLayer:
         return hidden_states
 
 
-class Qwen3MoeModel:
+class Model:
     def __init__(self, config: Qwen3MoeConfig, devices: Dict[int, ttnn.MeshDevice]):
         super().__init__()
         self.config = config
@@ -309,7 +309,7 @@ class Qwen3MoeModel:
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = Embedding()
-        self.layers = [Qwen3MoeDecoderLayer(config, layer_idx, devices[layer_idx // 6]) for layer_idx in range(config.num_hidden_layers)]
+        self.layers = [DecoderLayer(config, layer_idx, devices[layer_idx // 6]) for layer_idx in range(config.num_hidden_layers)]
         self.norm = RMSNorm()
         self.lm_head = Linear()
 
@@ -358,4 +358,4 @@ class Qwen3MoeModel:
             logits = ttnn.to_torch(logits, dtype=torch.float16)
         return logits
 
-__all__ = ["Qwen3MoeModel"]
+__all__ = ["Model"]

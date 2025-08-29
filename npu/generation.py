@@ -6,7 +6,7 @@ import ttnn
 from tokenizers import Tokenizer
 
 from npu.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
-from npu.qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel
+from npu.qwen3_moe.modeling_qwen3_moe import Model
 
 from npu.utils.loader import load
 
@@ -34,7 +34,7 @@ class Qwen3MoE:
                 data = json.load(f)
 
         self.config = Qwen3MoeConfig.from_dict(data)
-        self.model = Qwen3MoeModel(self.config, devices)
+        self.model = Model(self.config, devices)
         self.tokenizer = Tokenizer.from_file(tokenizer_path)
         load(ckpt_dir, self.model, devices)
 
