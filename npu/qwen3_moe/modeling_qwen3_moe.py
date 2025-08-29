@@ -112,7 +112,7 @@ class Attention:
         assert not config.attention_bias
 
 
-    def forward(
+    def __call__(
         self,
         hidden_states: Union[torch.Tensor, ttnn.Tensor],
         start_pos: int,
@@ -185,11 +185,11 @@ class Qwen3MoeMLP:
         self.act_fn = ttnn.silu
         assert config.hidden_act == "silu"
 
-    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         return self.down_proj(ttnn.multiply(self.act_fn(self.gate_proj(x)), self.up_proj(x)))
 
 
-class Qwen3MoeSparseMoeBlock(nn.Module):
+class Qwen3MoeSparseMoeBlock:
     def __init__(self, config: Qwen3MoeConfig, layer_idx: int, device: ttnn.Device):
         super().__init__()
         self.device = device
@@ -203,7 +203,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
         self.layer_idx = layer_idx
 
-    def forward(self, hidden_states: ttnn.Tensor) -> ttnn.Tensor:
+    def __call__(self, hidden_states: ttnn.Tensor) -> ttnn.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         N = batch_size * sequence_length
         E = self.num_experts
@@ -249,7 +249,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         for expert_idx in expert_hitted:
             expert_layer = self.experts[expert_idx]
 
-            current_hidden_states = expert_layer.forward(hidden_states)
+            current_hidden_states = expert_layer(hidden_states)
             current_hidden_states = ttnn.reshape(current_hidden_states, (1, 1, N, hidden_dim))
             current_hidden_states = ttnn.to_layout(current_hidden_states, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
@@ -264,7 +264,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         return ttnn.to_torch(final_hidden_states, dtype=torch.float16)
 
 
-class Qwen3MoeDecoderLayer(nn.Module):
+class Qwen3MoeDecoderLayer:
     def __init__(self, config: Qwen3MoeConfig, layer_idx: int, device: ttnn.Device):
         super().__init__()
         self.device = device
@@ -279,7 +279,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm()
         self.post_attention_layernorm = RMSNorm()
 
-    def forward(
+    def __call__(
         self,
         hidden_states: Union[torch.Tensor, ttnn.Tensor],
         start_pos: int,
@@ -288,7 +288,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         if isinstance(hidden_states, ttnn.Tensor):
             hidden_states = ttnn.to_torch(hidden_states, dtype=torch.float16)
-        hidden_states = hidden_states + ttnn.to_torch(self.self_attn.forward(
+        hidden_states = hidden_states + ttnn.to_torch(self.self_attn(
             hidden_states=self.input_layernorm(hidden_states),
             start_pos=start_pos,
             position_embeddings=position_embeddings,
@@ -299,7 +299,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         return hidden_states
 
 
-class Qwen3MoeModel(nn.Module):
+class Qwen3MoeModel:
     def __init__(self, config: Qwen3MoeConfig, devices: Dict[int, ttnn.MeshDevice]):
         super().__init__()
         self.config = config
@@ -309,7 +309,7 @@ class Qwen3MoeModel(nn.Module):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = Embedding()
-        self.layers = nn.ModuleList([Qwen3MoeDecoderLayer(config, layer_idx, devices[layer_idx // 6]) for layer_idx in range(config.num_hidden_layers)])  # temp
+        self.layers = [Qwen3MoeDecoderLayer(config, layer_idx, devices[layer_idx // 6]) for layer_idx in range(config.num_hidden_layers)]
         self.norm = RMSNorm()
         self.lm_head = Linear()
 
@@ -322,7 +322,7 @@ class Qwen3MoeModel(nn.Module):
         # Initialize weights and apply final processing
         # self.post_init()
 
-    def forward(self, input_ids: torch.LongTensor, start_pos: int = 0) -> torch.Tensor:
+    def __call__(self, input_ids: torch.LongTensor, start_pos: int = 0) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
 
         pos_embs_cos = self.pos_embs_cos[start_pos: start_pos + seq_len]

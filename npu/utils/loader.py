@@ -27,9 +27,6 @@ def owner_of(i: int, n_items: int, n_parts: int) -> int:
 def load_shard(ckpt_path: Path, model: nn.Module, devices: Dict[int, ttnn.MeshDevice]) -> None:
     assert len(devices) == 8
 
-    with torch.no_grad():
-        state_dict = dict(model.named_parameters())
-
     def partially_applied_owner_of(i: int) -> int:
         return owner_of(i, 48, 8)
 
@@ -60,14 +57,7 @@ def load_shard(ckpt_path: Path, model: nn.Module, devices: Dict[int, ttnn.MeshDe
                 device = devices[partially_applied_owner_of(layer_index)]
                 model.layers[layer_index].mlp.gate.load(source, device)
             else:
-                key = key[len("model."):] if key.startswith("model.") else key
-                target: torch.Tensor = state_dict[key]
-
-                assert source.shape == target.shape
-                with torch.no_grad():
-                    target.copy_(source.to(dtype=torch.float16))
-
-
+                assert False
 
 
 def load(ckpt_dir: str, model: nn.Module, devices: Dict[int, ttnn.MeshDevice], io_workers: int = 4, blas_workers: int = 2) -> None:
