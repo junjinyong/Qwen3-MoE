@@ -8,7 +8,7 @@ from tokenizers import Tokenizer
 from npu.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from npu.qwen3_moe.modeling_qwen3_moe import Qwen3MoeModel
 
-from npu.utils.loader import load, materialize
+from npu.utils.loader import load
 
 
 def sample_top_p(probs, p):
@@ -34,13 +34,9 @@ class Qwen3MoE:
                 data = json.load(f)
 
         self.config = Qwen3MoeConfig.from_dict(data)
-        with torch.device("meta"):
-            self.model = Qwen3MoeModel(self.config, devices)
+        self.model = Qwen3MoeModel(self.config, devices)
         self.tokenizer = Tokenizer.from_file(tokenizer_path)
-
-        #materialize(self.model)
         load(ckpt_dir, self.model, devices)
-        #self.model.eval()
 
     def generate(self, prompts: List[str], max_gen_len: int, temperature: float = 0.6, top_p: float = 0.9) -> List[List[str]]:
         prompt_tokens = [self.tokenizer.encode(prompt).ids for prompt in prompts]

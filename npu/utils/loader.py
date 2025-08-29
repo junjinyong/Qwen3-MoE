@@ -77,28 +77,3 @@ def load(ckpt_dir: str, model: nn.Module, devices: Dict[int, ttnn.MeshDevice], i
                     _ = fut.result()
 
     torch.set_num_threads(num_threads)
-
-
-def materialize(model: nn.Module) -> None:
-    seen_param_map = dict()
-
-    def _recurse(m: nn.Module) -> None:
-        for name, parameter in m._parameters.items():
-            if parameter is None:
-                continue
-            if not parameter.is_meta:
-                continue
-
-            parameter.grad = None
-            key = id(parameter)
-            if key in seen_param_map:
-                m._parameters[name] = seen_param_map[key]
-            else:
-                new_parameter = nn.Parameter(torch.empty_like(parameter, device=torch.device("cpu")), requires_grad=False)
-                seen_param_map[key] = new_parameter
-                m._parameters[name] = new_parameter
-
-        for child in m.children():
-            _recurse(child)
-
-    _recurse(model)
