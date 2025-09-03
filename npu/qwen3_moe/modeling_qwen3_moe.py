@@ -147,26 +147,21 @@ class Attention:
         else:
             raise Exception("Neither Decode mode nor Prefill mode")
 
-        if is_decode_mode:
-            for batch_index in range(batch_size):
-                key = ttnn.slice(key_states, [batch_index, 0, 0, 0], [batch_index + 1, 1, self.num_key_value_heads, self.head_dim])
-                value = ttnn.slice(value_states, [batch_index, 0, 0, 0], [batch_index + 1, 1, self.num_key_value_heads, self.head_dim])
-                key = ttnn.permute(key, (0, 2, 1, 3))
-                value = ttnn.permute(value, (0, 2, 1, 3))
-                key = ttnn.to_layout(key, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-                value = ttnn.to_layout(value, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        for batch_index in range(batch_size):
+            key = ttnn.slice(key_states, [batch_index, 0, 0, 0], [batch_index + 1, seq_len, self.num_key_value_heads, self.head_dim])
+            value = ttnn.slice(value_states, [batch_index, 0, 0, 0], [batch_index + 1, seq_len, self.num_key_value_heads, self.head_dim])
+            key = ttnn.permute(key, (0, 2, 1, 3))
+            value = ttnn.permute(value, (0, 2, 1, 3))
+            key = ttnn.to_layout(key, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+            value = ttnn.to_layout(value, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+
+            if is_decode_mode:
                 ttnn.kv_cache.update_cache_for_token_(self.cache_k, key, update_index=start_pos + self.max_seq_len * self.num_key_value_heads * batch_index)
                 ttnn.kv_cache.update_cache_for_token_(self.cache_v, value, update_index=start_pos + self.max_seq_len * self.num_key_value_heads * batch_index)
-        else:
-            for batch_index in range(batch_size):
-                key = ttnn.slice(key_states, [batch_index, 0, 0, 0], [batch_index + 1, seq_len, self.num_key_value_heads, self.head_dim])
-                value = ttnn.slice(value_states, [batch_index, 0, 0, 0], [batch_index + 1, seq_len, self.num_key_value_heads, self.head_dim])
-                key = ttnn.permute(key, (0, 2, 1, 3))
-                value = ttnn.permute(value, (0, 2, 1, 3))
-                key = ttnn.to_layout(key, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-                value = ttnn.to_layout(value, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+            else:
                 ttnn.kv_cache.fill_cache_for_user_(self.cache_k, key, batch_index=batch_index)
                 ttnn.kv_cache.fill_cache_for_user_(self.cache_v, value, batch_index=batch_index)
+
 
         key_states = ttnn.slice(self.cache_k, [0, 0, 0, 0], [batch_size, self.num_key_value_heads, start_pos + seq_len, self.head_dim])
         value_states = ttnn.slice(self.cache_v, [0, 0, 0, 0], [batch_size, self.num_key_value_heads, start_pos + seq_len, self.head_dim])
