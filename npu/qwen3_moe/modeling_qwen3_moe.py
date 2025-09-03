@@ -86,6 +86,10 @@ class Attention:
         super().__init__()
         self.config = config
         self.device = device
+
+        self.max_batch_size = config.max_batch_size
+        self.max_seq_len = config.max_seq_len
+
         self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
@@ -100,11 +104,9 @@ class Attention:
         self.k_norm = RMSNorm()
         self.sliding_window = None
 
-        cache_shape = (config.max_batch_size, config.max_seq_len, self.num_key_value_heads, self.head_dim)
-        self.cache_k = torch.zeros(cache_shape, dtype=torch.float16, device=torch.device("cpu"), requires_grad=False)
-        self.cache_v = torch.zeros(cache_shape, dtype=torch.float16, device=torch.device("cpu"), requires_grad=False)
-        #self.cache_k = ttnn.zeros(cache_shape, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
-        #self.cache_v = ttnn.zeros(cache_shape, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
+        cache_shape = (self.max_batch_size, self.num_key_value_heads, self.max_seq_len, self.head_dim)
+        self.cache_k = ttnn.zeros(cache_shape, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
+        self.cache_v = ttnn.zeros(cache_shape, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
 
         assert config._attn_implementation == "sdpa"
         assert config.num_attention_heads % config.num_key_value_heads == 0
@@ -124,16 +126,11 @@ class Attention:
 
         batch_size, seq_len, _ = hidden_states.shape
         input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim) # [batch_size, seq_len, -1, head_dim]
+        hidden_shape = (*input_shape, -1, self.head_dim)
 
         query_states = self.q_norm(ttnn.to_torch(self.q_proj(hidden_states), dtype=torch.float16).view(hidden_shape))
         key_states = self.k_norm(ttnn.to_torch(self.k_proj(hidden_states), dtype=torch.float16).view(hidden_shape))
-        value_states = ttnn.to_torch(self.v_proj(hidden_states), dtype=torch.float16).view(hidden_shape)
-
-        #print(query_states.shape)
-        #print(key_states.shape)
-        #print(position_embeddings[0].shape)
-        #print(position_embeddings[1].shape)
+        value_states = ttnn.reshape(self.v_proj(hidden_states), hidden_shape)
 
         query_states = ttnn.to_layout(query_states, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         key_states = ttnn.to_layout(key_states, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
@@ -143,28 +140,46 @@ class Attention:
 
         query_states, key_states = apply_rotary_emb(query_states, key_states, position_embeddings)
 
-        query_states = ttnn.to_torch(query_states, dtype=torch.float16)
-        key_states = ttnn.to_torch(key_states, dtype=torch.float16)
+        if start_pos == 0:
+            is_decode_mode = False
+        elif seq_len == 1:
+            is_decode_mode = True
+        else:
+            raise Exception("Neither Decode mode nor Prefill mode")
 
-        #query_states = ttnn.as_tensor(query_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
-        #key_states = ttnn.as_tensor(key_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
+        if is_decode_mode:
+            for batch_index in range(batch_size):
+                key = ttnn.slice(key_states, [batch_index, 0, 0, 0], [batch_index + 1, 1, self.num_key_value_heads, self.head_dim])
+                value = ttnn.slice(value_states, [batch_index, 0, 0, 0], [batch_index + 1, 1, self.num_key_value_heads, self.head_dim])
+                key = ttnn.permute(key, (0, 2, 1, 3))
+                value = ttnn.permute(value, (0, 2, 1, 3))
+                key = ttnn.to_layout(key, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+                value = ttnn.to_layout(value, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+                ttnn.kv_cache.update_cache_for_token_(self.cache_k, key, update_index=start_pos + self.max_seq_len * self.num_key_value_heads * batch_index)
+                ttnn.kv_cache.update_cache_for_token_(self.cache_v, value, update_index=start_pos + self.max_seq_len * self.num_key_value_heads * batch_index)
+        else:
+            for batch_index in range(batch_size):
+                key = ttnn.slice(key_states, [batch_index, 0, 0, 0], [batch_index + 1, seq_len, self.num_key_value_heads, self.head_dim])
+                value = ttnn.slice(value_states, [batch_index, 0, 0, 0], [batch_index + 1, seq_len, self.num_key_value_heads, self.head_dim])
+                key = ttnn.permute(key, (0, 2, 1, 3))
+                value = ttnn.permute(value, (0, 2, 1, 3))
+                key = ttnn.to_layout(key, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+                value = ttnn.to_layout(value, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+                ttnn.kv_cache.fill_cache_for_user_(self.cache_k, key, batch_index=batch_index)
+                ttnn.kv_cache.fill_cache_for_user_(self.cache_v, value, batch_index=batch_index)
 
-        self.cache_k[:batch_size, start_pos:start_pos + seq_len] = key_states
-        self.cache_v[:batch_size, start_pos:start_pos + seq_len] = value_states
+        key_states = ttnn.slice(self.cache_k, [0, 0, 0, 0], [batch_size, self.num_key_value_heads, start_pos + seq_len, self.head_dim])
+        value_states = ttnn.slice(self.cache_v, [0, 0, 0, 0], [batch_size, self.num_key_value_heads, start_pos + seq_len, self.head_dim])
+        key_states = ttnn.permute(key_states, (0, 2, 1, 3))
+        value_states = ttnn.permute(value_states, (0, 2, 1, 3))
 
-        key_states = self.cache_k[:batch_size, :start_pos + seq_len]
-        value_states = self.cache_v[:batch_size, :start_pos + seq_len]
+        query_states = ttnn.permute(query_states, (0, 2, 1, 3))
+        key_states = ttnn.permute(key_states, (0, 2, 1, 3))
+        value_states = ttnn.permute(value_states, (0, 2, 1, 3))
 
-        #key_states = repeat_kv(key_states, self.num_key_value_groups)
-        #value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-
-        query_states = ttnn.as_tensor(query_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.ROW_MAJOR_LAYOUT)
-        key_states = ttnn.as_tensor(key_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.ROW_MAJOR_LAYOUT)
-        value_states = ttnn.as_tensor(value_states, dtype=ttnn.bfloat16, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.ROW_MAJOR_LAYOUT)
+        query_states = ttnn.to_layout(query_states, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        key_states = ttnn.to_layout(key_states, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        value_states = ttnn.to_layout(value_states, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         attn_output = sdpa_attention_forward(query_states, key_states, value_states, attention_mask)
 
