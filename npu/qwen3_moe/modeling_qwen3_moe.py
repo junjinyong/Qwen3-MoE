@@ -1,10 +1,7 @@
 import torch
-import torch.nn.functional as F
-from torch import nn
+import ttnn
 
 from typing import Union, Dict, Tuple
-
-import ttnn
 
 from npu.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from npu.transformers.sdpa_attention import sdpa_attention_forward
@@ -128,8 +125,8 @@ class Attention:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_norm(ttnn.to_torch(self.q_proj(hidden_states), dtype=torch.float16).view(hidden_shape))
-        key_states = self.k_norm(ttnn.to_torch(self.k_proj(hidden_states), dtype=torch.float16).view(hidden_shape))
+        query_states = self.q_norm(ttnn.reshape(self.q_proj(hidden_states), hidden_shape))
+        key_states = self.k_norm(ttnn.reshape(self.k_proj(hidden_states), hidden_shape))
         value_states = ttnn.reshape(self.v_proj(hidden_states), hidden_shape)
 
         query_states = ttnn.to_layout(query_states, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
@@ -219,7 +216,6 @@ class SparseMoeBlock:
         E = self.num_experts
         K = self.top_k
 
-
         hidden_states = ttnn.reshape(hidden_states, (N, hidden_dim))
         router_logits = self.gate(hidden_states)
         router_logits = ttnn.to_layout(router_logits, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
@@ -231,15 +227,11 @@ class SparseMoeBlock:
             denom = ttnn.sum(routing_weights, dim=-1, keepdim=True)
             routing_weights = ttnn.div(routing_weights, denom)
 
-        routing_weights = ttnn.to_layout(routing_weights, layout=ttnn.ROW_MAJOR_LAYOUT)
-        selected_experts = ttnn.to_layout(selected_experts, layout=ttnn.ROW_MAJOR_LAYOUT)
-        routing_weights = ttnn.to_layout(routing_weights, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.float32)
-        selected_experts = ttnn.to_layout(selected_experts, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.float32)
-
+        routing_weights = ttnn.clone(routing_weights, dtype=ttnn.bfloat16)
 
         weights_full = ttnn.zeros(
             (1, 1, N, E),
-            dtype=ttnn.float32,
+            dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
             device=self.device,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
