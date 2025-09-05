@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import ttnn
@@ -19,6 +19,10 @@ def sdpa_attention_forward(
     dropout: float = 0.0,
     scaling: Optional[float] = None,
 ) -> torch.Tensor:
+    query = ttnn.to_layout(query, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    key = ttnn.to_layout(key, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    value = ttnn.to_layout(value, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
     query_shape = query.shape
     key_shape = key.shape
     value_shape = value.shape
@@ -45,6 +49,7 @@ def sdpa_attention_forward(
     )
     attn_output = ttnn.to_layout(ttnn.permute(attn_output, dims=(0, 2, 1, 3)), layout=ttnn.ROW_MAJOR_LAYOUT)
     attn_output = ttnn.slice(attn_output, [0, 0, 0, 0], [query_shape[0], query_shape[2], query_shape[1], value_shape[3]])
-    attn_output = ttnn.to_torch(attn_output, dtype=torch.float16)
-
     return attn_output
+
+
+__all__ = ["sdpa_attention_forward"]

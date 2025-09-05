@@ -6,81 +6,81 @@ from typing import Union, Dict, Tuple
 from npu.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from npu.transformers.sdpa_attention import sdpa_attention_forward
 from npu.qwen3_moe.rope_helpers import precompute_freqs_cis, apply_rotary_emb
+from npu.utils.loader import owner_of
 
 
 class Embedding:
-    def __init__(self):
+    def __init__(self, device: ttnn.MeshDevice):
         super().__init__()
+        assert isinstance(device, ttnn.MeshDevice)
         self.weight = None
-        self.device = None
+        self.device = device
 
-    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
+    def load(self, torch_weight: torch.Tensor):
+        assert isinstance(torch_weight, torch.Tensor)
         self.weight = ttnn.as_tensor(
             torch_weight,
             dtype=ttnn.bfloat16,
-            device=device,
+            device=self.device,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
-        self.device = device
 
-    def __call__(self, x: Union[torch.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
-        if isinstance(x, torch.Tensor):
-            x = ttnn.as_tensor(x, dtype=ttnn.uint32, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    def __call__(self, x: torch.LongTensor) -> ttnn.Tensor:
+        x = ttnn.as_tensor(x, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         return ttnn.to_layout(ttnn.embedding(x, self.weight), layout=ttnn.TILE_LAYOUT)
 
 
 class Linear:
-    def __init__(self):
+    def __init__(self, device: ttnn.MeshDevice):
         super().__init__()
+        assert isinstance(device, ttnn.MeshDevice)
         self.weight = None
-        self.device = None
+        self.device = device
 
-    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
+    def load(self, torch_weight: torch.Tensor):
+        assert isinstance(torch_weight, torch.Tensor)
         self.weight = ttnn.as_tensor(
             torch_weight,
             dtype=ttnn.bfloat16,
-            device=device,
+            device=self.device,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             layout=ttnn.TILE_LAYOUT,
         )
-        self.device = device
 
-    def __call__(self, x: Union[torch.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
-        if isinstance(x, torch.Tensor):
-            x = ttnn.as_tensor(x, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        return ttnn.linear(x, self.weight, transpose_b=True, bias=None)
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.clone(ttnn.linear(x, self.weight, transpose_b=True, bias=None), dtype=ttnn.bfloat16)
 
 
 class RMSNorm:
-    def __init__(self):
+    def __init__(self, device: ttnn.MeshDevice):
         super().__init__()
+        assert isinstance(device, ttnn.MeshDevice)
         self.weight = None
         self.epsilon = None
-        self.device = None
+        self.device = device
 
-    def load(self, torch_weight: torch.Tensor, device: ttnn.Device):
+    def load(self, torch_weight: torch.Tensor):
+        assert isinstance(torch_weight, torch.Tensor)
         self.weight = ttnn.as_tensor(
             torch_weight,
-            dtype=ttnn.bfloat16,
-            device=device,
+            dtype=ttnn.bfloat16,  # ttnn.float32
+            device=self.device,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             layout=ttnn.TILE_LAYOUT,
         )
         self.epsilon = 1e-6
-        self.device = device
 
-    def __call__(self, x: Union[torch.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
-        if isinstance(x, torch.Tensor):
-            x = ttnn.as_tensor(x, dtype=ttnn.float32, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        else:
-            x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        return ttnn.rms_norm(x, epsilon=self.epsilon, weight=self.weight)
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.to_layout(ttnn.rms_norm(x, epsilon=self.epsilon, weight=self.weight), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
 
 class Attention:
-    def __init__(self, config: Qwen3MoeConfig, device: ttnn.Device):
+    def __init__(self, config: Qwen3MoeConfig, device: ttnn.MeshDevice):
         super().__init__()
+        assert isinstance(device, ttnn.MeshDevice)
         self.config = config
         self.device = device
 
@@ -93,12 +93,12 @@ class Attention:
         self.scaling = pow(self.head_dim, -0.5)
         self.attention_dropout = config.attention_dropout
 
-        self.q_proj = Linear()
-        self.k_proj = Linear()
-        self.v_proj = Linear()
-        self.o_proj = Linear()
-        self.q_norm = RMSNorm()
-        self.k_norm = RMSNorm()
+        self.q_proj = Linear(device=self.device)
+        self.k_proj = Linear(device=self.device)
+        self.v_proj = Linear(device=self.device)
+        self.o_proj = Linear(device=self.device)
+        self.q_norm = RMSNorm(device=self.device)
+        self.k_norm = RMSNorm(device=self.device)
         self.sliding_window = None
 
         cache_shape = (self.max_batch_size, self.num_key_value_heads, self.max_seq_len, self.head_dim)
@@ -113,17 +113,13 @@ class Attention:
 
     def __call__(
         self,
-        hidden_states: Union[torch.Tensor, ttnn.Tensor],
+        hidden_states: ttnn.Tensor,
         start_pos: int,
         position_embeddings: Tuple[ttnn.Tensor, ttnn.Tensor],
-        attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        if isinstance(hidden_states, ttnn.Tensor):
-            hidden_states = ttnn.to_torch(hidden_states, dtype=torch.float16)
-
+        attention_mask: ttnn.Tensor
+    ) -> ttnn.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
+        hidden_shape = (batch_size, seq_len, -1, self.head_dim)
 
         query_states = self.q_norm(ttnn.reshape(self.q_proj(hidden_states), hidden_shape))
         key_states = self.k_norm(ttnn.reshape(self.k_proj(hidden_states), hidden_shape))
@@ -169,26 +165,26 @@ class Attention:
         key_states = ttnn.permute(key_states, (0, 2, 1, 3))
         value_states = ttnn.permute(value_states, (0, 2, 1, 3))
 
-        query_states = ttnn.to_layout(query_states, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        key_states = ttnn.to_layout(key_states, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        value_states = ttnn.to_layout(value_states, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
 
         attn_output = sdpa_attention_forward(query_states, key_states, value_states, attention_mask)
 
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = ttnn.reshape(attn_output, (batch_size, seq_len, -1))
         attn_output = self.o_proj(attn_output)
         return attn_output
 
 
 class MoeMLP:
-    def __init__(self, config: Qwen3MoeConfig, intermediate_size: int):
+    def __init__(self, config: Qwen3MoeConfig, device: ttnn.MeshDevice):
         super().__init__()
+        assert isinstance(device, ttnn.MeshDevice)
         self.config = config
+        self.device = device
+
         self.hidden_size = config.hidden_size
-        self.intermediate_size = intermediate_size
-        self.gate_proj = Linear()
-        self.up_proj = Linear()
-        self.down_proj = Linear()
+        self.gate_proj = Linear(device=self.device)
+        self.up_proj = Linear(device=self.device)
+        self.down_proj = Linear(device=self.device)
         self.act_fn = ttnn.silu
         assert config.hidden_act == "silu"
 
@@ -197,16 +193,17 @@ class MoeMLP:
 
 
 class SparseMoeBlock:
-    def __init__(self, config: Qwen3MoeConfig, layer_idx: int, device: ttnn.Device):
+    def __init__(self, config: Qwen3MoeConfig, layer_idx: int, device: ttnn.MeshDevice):
         super().__init__()
+        assert isinstance(device, ttnn.MeshDevice)
         self.device = device
 
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
 
-        self.gate = Linear()
-        self.experts = [MoeMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(self.num_experts)]
+        self.gate = Linear(device=self.device)
+        self.experts = [MoeMLP(config, device=self.device) for _ in range(self.num_experts)]
 
         self.layer_idx = layer_idx
 
@@ -262,58 +259,62 @@ class SparseMoeBlock:
 
         final_hidden_states = ttnn.reshape(final_hidden_states, (N, hidden_dim))
         final_hidden_states = ttnn.reshape(final_hidden_states, (batch_size, sequence_length, hidden_dim))
-
-        return ttnn.to_torch(final_hidden_states, dtype=torch.float16)
+        return final_hidden_states
 
 
 class DecoderLayer:
-    def __init__(self, config: Qwen3MoeConfig, layer_idx: int, device: ttnn.Device):
+    def __init__(self, config: Qwen3MoeConfig, layer_idx: int, device: ttnn.MeshDevice):
         super().__init__()
+        assert isinstance(device, ttnn.MeshDevice)
         self.device = device
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Attention(config, device)
+        self.self_attn = Attention(config, device=self.device)
 
         assert (config.mlp_only_layers is None) or (layer_idx not in config.mlp_only_layers)
         assert config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
-        self.mlp = SparseMoeBlock(config, layer_idx, device)
+        self.mlp = SparseMoeBlock(config, layer_idx, device=self.device)
 
-        self.input_layernorm = RMSNorm()
-        self.post_attention_layernorm = RMSNorm()
+        self.input_layernorm = RMSNorm(device=self.device)
+        self.post_attention_layernorm = RMSNorm(device=self.device)
 
     def __call__(
         self,
-        hidden_states: Union[torch.Tensor, ttnn.Tensor],
+        hidden_states: ttnn.Tensor,
         start_pos: int,
         position_embeddings: Tuple[ttnn.Tensor, ttnn.Tensor],
-        attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        if isinstance(hidden_states, ttnn.Tensor):
-            hidden_states = ttnn.to_torch(hidden_states, dtype=torch.float16)
-        hidden_states = hidden_states + ttnn.to_torch(self.self_attn(
+        attention_mask: ttnn.Tensor,
+    ) -> ttnn.Tensor:
+        if hidden_states.device() != self.device:
+            hidden_states = ttnn.to_device(ttnn.from_device(hidden_states), device=self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        hidden_states = hidden_states + self.self_attn(
             hidden_states=self.input_layernorm(hidden_states),
             start_pos=start_pos,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask
-        ), dtype=torch.float16)
-
-        hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+        )
+        hidden_states = ttnn.add(hidden_states, self.mlp(self.post_attention_layernorm(hidden_states)))
         return hidden_states
 
 
 class Model:
     def __init__(self, config: Qwen3MoeConfig, devices: Dict[int, ttnn.MeshDevice]):
         super().__init__()
+        assert list(devices.keys()) == list(range(8))
+        assert all(isinstance(device, ttnn.MeshDevice) for device in devices.values())
         self.config = config
         self.devices = devices
+        self.num_devices = len(devices)
+
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = Embedding()
-        self.layers = [DecoderLayer(config, layer_idx, devices[layer_idx // 6]) for layer_idx in range(config.num_hidden_layers)]
-        self.norm = RMSNorm()
-        self.lm_head = Linear()
+        self.embed_tokens = Embedding(devices[0])
+        get_device = lambda layer_idx: self.devices[owner_of(layer_idx, config.num_hidden_layers, self.num_devices)]
+        self.layers = [DecoderLayer(config, layer_idx, device=get_device(layer_idx)) for layer_idx in range(config.num_hidden_layers)]
+        self.norm = RMSNorm(devices[7])
+        self.lm_head = Linear(devices[7])
 
         pos_embs_cos, pos_embs_sin = precompute_freqs_cis(config)
         self.pos_embs_cos = pos_embs_cos
@@ -332,7 +333,7 @@ class Model:
 
         hidden_states = self.embed_tokens(input_ids)
 
-        for decoder_layer in self.layers:
+        for i, decoder_layer in enumerate(self.layers):
             device = decoder_layer.device
 
             cos = ttnn.from_torch(pos_embs_cos, dtype=ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
@@ -356,8 +357,6 @@ class Model:
 
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
-        if isinstance(logits, ttnn.Tensor):
-            logits = ttnn.to_torch(logits, dtype=torch.float16)
-        return logits
+        return ttnn.to_torch(logits, dtype=torch.float16)
 
 __all__ = ["Model"]
