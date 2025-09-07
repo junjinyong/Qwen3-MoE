@@ -1,11 +1,12 @@
 from typing import List, Dict
 from pathlib import Path
 import torch
-import torch.nn as nn
-import ttnn
 from safetensors.torch import safe_open
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
+
+from npu.utils.structural_types import Model
+
 
 PATTERN_LN = re.compile(r'^model\.layers\.(?P<layer_index>\d+)\.(?P<norm_name>input_layernorm|post_attention_layernorm)\.weight$')
 PATTERN_ATTN = re.compile(r'^model\.layers\.(?P<layer_index>\d+)\.self_attn\.(?P<attn_name>q_norm|k_norm|q_proj|k_proj|v_proj|o_proj)\.weight$')
@@ -24,7 +25,7 @@ def owner_of(i: int, n_items: int, n_parts: int) -> int:
     return (i // (q + 1)) if i < cutoff else (r + (i - cutoff) // q)
 
 
-def load_shard(ckpt_path: Path, model: nn.Module) -> None:
+def load_shard(ckpt_path: Path, model: Model) -> None:
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
         for key in f.keys():
             source: torch.Tensor = f.get_tensor(key)
@@ -37,22 +38,31 @@ def load_shard(ckpt_path: Path, model: nn.Module) -> None:
                 model.norm.load(source)
             elif m := PATTERN_LN.fullmatch(key):
                 layer_index, norm_name = int(m['layer_index']), m['norm_name']
+                assert 0 <= layer_index < 48
+                assert norm_name in ["input_layernorm", "post_attention_layernorm"]
                 getattr(model.layers[layer_index], norm_name).load(source)
             elif m:= PATTERN_ATTN.fullmatch(key):
                 layer_index, attn_name = int(m['layer_index']), m['attn_name']
+                assert 0 <= layer_index < 48
+                assert attn_name in ["q_norm", "k_norm", "q_proj", "k_proj", "v_proj", "o_proj"]
                 getattr(model.layers[layer_index].self_attn, attn_name).load(source)
             elif m := PATTERN_MLP_PROJ.fullmatch(key):
                 layer_index, expert_index, proj_name = int(m['layer_index']), int(m['expert_index']), m['proj_name']
+                assert 0 <= layer_index < 48
+                assert 0 <= expert_index < 128
+                assert proj_name in ["gate_proj", "up_proj", "down_proj"]
                 getattr(model.layers[layer_index].mlp.experts[expert_index], proj_name).load(source)
             elif m:= PATTERN_MOE_GATE.fullmatch(key):
                 layer_index = int(m['layer_index'])
+                assert 0 <= layer_index < 48
                 model.layers[layer_index].mlp.gate.load(source)
             else:
                 assert False
 
 
-def load(ckpt_dir: str, model: nn.Module, io_workers: int = 4, blas_workers: int = 2) -> None:
+def load(ckpt_dir: str, model: Model, io_workers: int = 8, blas_workers: int = 2) -> None:
     ckpt_paths = sorted(Path(ckpt_dir).glob("*.safetensors"))
+    assert len(ckpt_paths) == 16
 
     num_threads = torch.get_num_threads()
     torch.set_num_threads(blas_workers)

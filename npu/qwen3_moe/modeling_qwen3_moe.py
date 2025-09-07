@@ -54,18 +54,19 @@ class Linear:
 
 
 class RMSNorm:
-    def __init__(self, device: ttnn.MeshDevice):
+    def __init__(self, device: ttnn.MeshDevice, flag: bool = False):
         super().__init__()
         assert isinstance(device, ttnn.MeshDevice)
         self.weight = None
         self.epsilon = None
         self.device = device
+        self.flag = flag
 
     def load(self, torch_weight: torch.Tensor):
         assert isinstance(torch_weight, torch.Tensor)
         self.weight = ttnn.as_tensor(
             torch_weight,
-            dtype=ttnn.bfloat16,  # ttnn.float32
+            dtype=ttnn.bfloat16,
             device=self.device,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             layout=ttnn.TILE_LAYOUT,
@@ -74,7 +75,11 @@ class RMSNorm:
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        return ttnn.to_layout(ttnn.rms_norm(x, epsilon=self.epsilon, weight=self.weight), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        y = ttnn.rms_norm(x, epsilon=self.epsilon, weight=self.weight)
+        if self.flag:
+            return ttnn.to_layout(y, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        else:
+            return ttnn.to_layout(y, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
 
 class Attention:
@@ -97,8 +102,8 @@ class Attention:
         self.k_proj = Linear(device=self.device)
         self.v_proj = Linear(device=self.device)
         self.o_proj = Linear(device=self.device)
-        self.q_norm = RMSNorm(device=self.device)
-        self.k_norm = RMSNorm(device=self.device)
+        self.q_norm = RMSNorm(device=self.device, flag=True)
+        self.k_norm = RMSNorm(device=self.device, flag=True)
         self.sliding_window = None
 
         cache_shape = (self.max_batch_size, self.num_key_value_heads, self.max_seq_len, self.head_dim)
@@ -125,12 +130,6 @@ class Attention:
         key_states = self.k_norm(ttnn.reshape(self.k_proj(hidden_states), hidden_shape))
         value_states = ttnn.reshape(self.v_proj(hidden_states), hidden_shape)
 
-        query_states = ttnn.to_layout(query_states, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        key_states = ttnn.to_layout(key_states, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        
-        query_states = ttnn.to_layout(query_states, layout=ttnn.ROW_MAJOR_LAYOUT)
-        key_states = ttnn.to_layout(key_states, layout=ttnn.ROW_MAJOR_LAYOUT)
-
         query_states, key_states = apply_rotary_emb(query_states, key_states, position_embeddings)
 
         if start_pos == 0:
@@ -140,11 +139,12 @@ class Attention:
         else:
             raise Exception("Neither Decode mode nor Prefill mode")
 
+        key_states = ttnn.permute(key_states, (0, 2, 1, 3))
+        value_states = ttnn.permute(value_states, (0, 2, 1, 3))
+
         for batch_index in range(batch_size):
-            key = ttnn.slice(key_states, [batch_index, 0, 0, 0], [batch_index + 1, seq_len, self.num_key_value_heads, self.head_dim])
-            value = ttnn.slice(value_states, [batch_index, 0, 0, 0], [batch_index + 1, seq_len, self.num_key_value_heads, self.head_dim])
-            key = ttnn.permute(key, (0, 2, 1, 3))
-            value = ttnn.permute(value, (0, 2, 1, 3))
+            key = ttnn.slice(key_states, [batch_index, 0, 0, 0], [batch_index + 1, self.num_key_value_heads, seq_len, self.head_dim])
+            value = ttnn.slice(value_states, [batch_index, 0, 0, 0], [batch_index + 1, self.num_key_value_heads, seq_len, self.head_dim])
             key = ttnn.to_layout(key, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
             value = ttnn.to_layout(value, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
@@ -158,15 +158,8 @@ class Attention:
 
         key_states = ttnn.slice(self.cache_k, [0, 0, 0, 0], [batch_size, self.num_key_value_heads, start_pos + seq_len, self.head_dim])
         value_states = ttnn.slice(self.cache_v, [0, 0, 0, 0], [batch_size, self.num_key_value_heads, start_pos + seq_len, self.head_dim])
-        key_states = ttnn.permute(key_states, (0, 2, 1, 3))
-        value_states = ttnn.permute(value_states, (0, 2, 1, 3))
 
         query_states = ttnn.permute(query_states, (0, 2, 1, 3))
-        key_states = ttnn.permute(key_states, (0, 2, 1, 3))
-        value_states = ttnn.permute(value_states, (0, 2, 1, 3))
-
-
-
         attn_output = sdpa_attention_forward(query_states, key_states, value_states, attention_mask)
 
         attn_output = ttnn.reshape(attn_output, (batch_size, seq_len, -1))

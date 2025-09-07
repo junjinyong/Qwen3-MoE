@@ -5,10 +5,10 @@ from typing import Tuple, Union, Dict, List
 import torch
 import ttnn
 
-from npu.utils.structural_types import StructuralTypeA
+from npu.utils.structural_types import Config
 
 
-def precompute_freqs_cis(config: StructuralTypeA) -> Tuple[ttnn.Tensor, ttnn.Tensor]:
+def precompute_freqs_cis(config: Config) -> Tuple[ttnn.Tensor, ttnn.Tensor]:
     theta = config.rope_theta
     dim = config.head_dim
     max_seq_len = config.max_seq_len
@@ -35,8 +35,8 @@ def apply_rotary_emb(
     xk: ttnn.Tensor,
     freqs_cis: Tuple[ttnn.Tensor, ttnn.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    xq = ttnn.to_layout(xq, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.float32)
-    xk = ttnn.to_layout(xk, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.float32)
+    xq = ttnn.to_layout(xq, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16)
+    xk = ttnn.to_layout(xk, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16)
 
     def rotate(x: ttnn.Tensor):
         batch_size, seq_len, num_heads, head_dim = x.shape
