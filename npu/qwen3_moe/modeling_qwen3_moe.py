@@ -115,7 +115,6 @@ class Attention:
         assert config.sliding_window is None
         assert not config.attention_bias
 
-
     def __call__(
         self,
         hidden_states: ttnn.Tensor,
@@ -240,14 +239,11 @@ class SparseMoeBlock:
         expert_hitted = range(self.num_experts)
         for expert_idx in expert_hitted:
             expert_layer = self.experts[expert_idx]
-
             current_hidden_states = expert_layer(hidden_states)
             current_hidden_states = ttnn.reshape(current_hidden_states, (1, 1, N, hidden_dim))
             current_hidden_states = ttnn.to_layout(current_hidden_states, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
             mask_e = ttnn.slice(weights_4d, [0, 0, 0, expert_idx], [1, 1, N, expert_idx + 1])
-            mask_e = ttnn.repeat(mask_e, [1, 1, 1, hidden_dim])
-
             final_hidden_states = ttnn.add(final_hidden_states, ttnn.multiply(current_hidden_states, mask_e))
 
         final_hidden_states = ttnn.reshape(final_hidden_states, (N, hidden_dim))
